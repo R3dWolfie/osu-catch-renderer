@@ -80,6 +80,10 @@ class ReplayMeta:
     accuracy: float
     grade: str
     game_version: int = 0   # osr client version; <30000000 = osu!stable
+    # Map-time (ms) at which the player failed (HP hit 0), from the .osr
+    # life-bar graph. None = the play passed / no fail detected. Used to
+    # end the render at death instead of rendering the unplayed remainder.
+    death_ms: int | None = None
 
 
 @dataclass

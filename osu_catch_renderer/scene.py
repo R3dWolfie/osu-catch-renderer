@@ -46,12 +46,23 @@ class _Checkpoint:
 
 class CatchSim:
     def __init__(self, beatmap: CatchBeatmap, frames: list[CatchFrame], cfg: RenderConfig,
-                 skin=None, has_bg: bool = False, meta=None):
+                 skin=None, has_bg: bool = False, meta=None,
+                 end_ms: int | None = None):
         self.bm = beatmap
         self.frames = frames
         self.cfg = cfg
         self.skin = skin
         self.meta = meta
+        # On a failed play, gameplay stops at the death time. Objects past
+        # it were never reached, so they're excluded from BOTH the catch
+        # simulation (otherwise the count-reconcile spreads the played
+        # counts across unplayed objects → phantom misses) and the draw
+        # loop. None = play the whole map.
+        self._end_ms = end_ms
+        self._objs = [o for o in beatmap.objects
+                      if end_ms is None or o.time_ms <= end_ms]
+        if not self._objs:   # death before any object — don't blank the sim
+            self._objs = list(beatmap.objects)
         self.score_scale = 1.0
         self.acc_offset = 0.0   # shifts sim accuracy to the replay's real final
         self.final_counts = (0, 0, 0, 0, 0)  # (300, 100, 50, katu, miss)
@@ -97,7 +108,7 @@ class CatchSim:
     def _simulate(self) -> None:
         import math
         log_cap = math.log(self._COMBO_CAP, self._COMBO_BASE)
-        objs = self.bm.objects
+        objs = self._objs
 
         # --- pass 1: geometric catch + signed margin (dist-half) per object ---
         margin: list[float] = []
@@ -236,7 +247,7 @@ class CatchSim:
                                     texture_key="bg", color=(d, d, d, 1.0)))
 
         # falling objects within their approach window (and not yet caught/past)
-        for obj, caught in zip(self.bm.objects, self._caught):
+        for obj, caught in zip(self._objs, self._caught):
             if obj.time_ms - self.preempt <= t_ms <= obj.time_ms:
                 y = self._fruit_y(obj.time_ms, t_ms)
                 s.sprites.extend(self._object_sprites(obj, self._sx(obj.x), y, t_ms))

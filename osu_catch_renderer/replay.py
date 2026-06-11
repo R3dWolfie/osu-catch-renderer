@@ -68,11 +68,34 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         frames.append(CatchFrame(time_ms=max(t, 0), x=float(x), dashing=_dashing(ev)))
     frames.sort(key=lambda f: f.time_ms)
 
-    total = r.count_300 + r.count_100 + r.count_50 + r.count_miss
+    # osu!catch accuracy: every caught object (fruit / large droplet /
+    # tiny droplet) counts equally; the denominator includes missed tiny
+    # droplets (count_katu) and missed fruit/large droplets (count_miss).
+    # NOT the std 300/100-half/50-quarter weighting.
+    total = (r.count_300 + r.count_100 + r.count_50
+             + r.count_katu + r.count_miss)
     if total > 0:
-        acc = (r.count_300 + r.count_100 / 2.0 + r.count_50 / 4.0) / total
+        acc = (r.count_300 + r.count_100 + r.count_50) / total
     else:
         acc = 1.0
+
+    # Detect a fail from the life-bar graph. In osu!catch a play ends the
+    # instant HP hits 0 — but the renderer otherwise plays the *full* map,
+    # freezing the catcher after the replay's last frame so every unreached
+    # object reads as a miss (the "fruits dropping through a stationary
+    # catcher" bug). Capturing the death time lets render_core stop at the
+    # fail. NoFail replays never die, so they're exempt.
+    death_ms: int | None = None
+    NF = 0x1
+    if not (int(r.mods) & NF):
+        for e in (getattr(r, "life_bar_graph", None) or []):
+            try:
+                if float(e.life) <= 0.001:
+                    death_ms = int(e.time)
+                    break
+            except (TypeError, ValueError, AttributeError):
+                continue
+
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
         beatmap_md5=str(getattr(r, "beatmap_hash", "") or ""),
@@ -88,6 +111,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         accuracy=round(acc * 100, 2),
         grade=_grade(acc, r),
         game_version=int(getattr(r, "game_version", 0) or 0),
+        death_ms=death_ms,
     )
     return frames, meta
 

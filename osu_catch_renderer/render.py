@@ -70,12 +70,21 @@ def render_core(
     if cfg.skin_dir is not None:
         from .skin import CatchSkin
         skin = CatchSkin(cfg.skin_dir, cfg.default_skin_dir)
-    sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None, meta=meta)
+    # Failed play: end the render at death instead of playing the unreached
+    # remainder with a frozen catcher (which reads as phantom misses). Only
+    # treat it as a fail if death lands meaningfully before the last object
+    # — a life dip to 0 on the final note still effectively finished the map.
+    last_obj = bm.objects[-1].time_ms
+    death_ms = getattr(meta, "death_ms", None)
+    failed = death_ms is not None and death_ms < last_obj - 200
+    sim_end_ms = int(death_ms) if failed else None
+    sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None,
+                   meta=meta, end_ms=sim_end_ms)
     if cfg.show_pp_counter and osu_path is not None:
         sim.compute_pp_curve(osu_path, meta.mods)
     preempt = ar_to_preempt_ms(bm.ar)
     first = bm.objects[0].time_ms
-    last = bm.objects[-1].time_ms
+    last = min(last_obj, int(death_ms)) if failed else last_obj
     # skip_intro: start at the first object's approach; else render the full
     # intro from the song start.
     if cfg.skip_intro:
