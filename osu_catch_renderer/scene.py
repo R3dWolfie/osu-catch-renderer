@@ -71,6 +71,8 @@ class CatchSim:
         self.bg_dim = 0.30
         # approach window in the rate-adjusted (real) timeline the replay uses
         self.preempt = ar_to_preempt_ms(beatmap.ar) / beatmap.rate
+        # Hidden (HD, mod bit 8): fruits fade out as they near the catcher.
+        self.hidden = bool((getattr(meta, "mods", 0) or 0) & 8)
         self.half = cs_to_catcher_half_width(beatmap.cs)
 
         w, h = cfg.resolution
@@ -250,7 +252,14 @@ class CatchSim:
         for obj, caught in zip(self._objs, self._caught):
             if obj.time_ms - self.preempt <= t_ms <= obj.time_ms:
                 y = self._fruit_y(obj.time_ms, t_ms)
-                s.sprites.extend(self._object_sprites(obj, self._sx(obj.x), y, t_ms))
+                sprites = self._object_sprites(obj, self._sx(obj.x), y, t_ms)
+                if self.hidden:
+                    a = self._hd_alpha(obj.time_ms, t_ms)
+                    if a < 1.0:
+                        for sp in sprites:
+                            r, g, b, al = sp.color
+                            sp.color = (r, g, b, al * a)
+                s.sprites.extend(sprites)
 
         # catcher (+ dash trail + caught-fruit pile riding on the plate)
         cx, dashing = catcher_x_at(self.frames, t_ms)
@@ -323,6 +332,19 @@ class CatchSim:
                 samples[lo] + (samples[hi] - samples[lo]) * (i - lo) / (hi - lo))
 
     # --- sprite emission ------------------------------------------------------
+
+    def _hd_alpha(self, obj_time: int, t_ms: int) -> float:
+        """osu!catch Hidden fade (CatchModHidden). Time-based on TimePreempt:
+        fade starts at StartTime - 0.6*preempt and completes (invisible) at
+        StartTime - 0.44*preempt — so a fruit is fully visible for the first
+        ~40% of its fall, fades over 16% of the preempt, then is invisible for
+        the last 44% before reaching the catcher."""
+        p = self.preempt
+        if p <= 0:
+            return 1.0
+        t_rem = obj_time - t_ms          # ms until the catch line
+        a = (t_rem - 0.44 * p) / (0.16 * p)
+        return 0.0 if a < 0.0 else (1.0 if a > 1.0 else a)
 
     def _object_sprites(self, obj, x, y, t_ms) -> list[Sprite]:
         if self.skin is not None:
