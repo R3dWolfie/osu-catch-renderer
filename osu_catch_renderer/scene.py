@@ -99,6 +99,7 @@ class CatchSim:
         self._checkpoints: list[_Checkpoint] = []
         self._catches: list[tuple[int, int, bool]] = []   # (time, combo_index, hyper)
         self._hyper_windows: list[tuple[int, int]] = []    # catcher glows red in these
+        self._calibrate_offset()
         self._simulate()
 
     # --- simulation -----------------------------------------------------------
@@ -106,6 +107,58 @@ class CatchSim:
     # lazer combo-portion log accumulation constants (CatchScoreProcessor)
     _COMBO_BASE = 4
     _COMBO_CAP = 200
+
+    def _calibrate_offset(self) -> None:
+        """A handful of catch replays carry a constant timeline shift vs the
+        beatmap: the recorded catcher path is offset by a fixed lag, so every
+        fruit lands while the plate is somewhere else (the "catcher wrong
+        position" bug). Detect it by cross-correlating the catcher trajectory
+        against the catchable fruit positions, then shift the frames to match
+        ONLY when the evidence is overwhelming -- a sharp, high alignment peak
+        well above the no-shift baseline. Normal/stable replays calibrate to
+        ~0 and are left completely untouched, so this can never harm them.
+        """
+        import sys
+        frames = self.frames
+        if len(frames) < 50:
+            return
+        span_end = frames[-1].time_ms
+        objs = [o for o in self._objs
+                if o.kind is not ObjType.BANANA and o.time_ms <= span_end]
+        if len(objs) > 2000:                       # cap cost on long maps
+            objs = objs[:: (len(objs) // 2000) + 1]
+        if len(objs) < 60:                         # too few to trust a peak
+            return
+        half = self.half
+
+        def hit_rate(off: int) -> float:
+            hit = 0
+            for o in objs:
+                cx, _ = catcher_x_at(frames, o.time_ms + off)
+                if abs(cx - o.x) <= half:
+                    hit += 1
+            return hit / len(objs)
+
+        base = hit_rate(0)
+        best_off, best = 0, base
+        for off in range(-4000, 1001, 50):         # coarse sweep
+            r = hit_rate(off)
+            if r > best:
+                best, best_off = r, off
+        if best_off:                               # refine around the peak
+            for off in range(best_off - 50, best_off + 51, 10):
+                r = hit_rate(off)
+                if r > best:
+                    best, best_off = r, off
+
+        # Strict guard: only correct an unmistakable constant shift.
+        if abs(best_off) >= 150 and best >= 0.85 and (best - base) >= 0.20:
+            shift = -best_off
+            self.frames = [CatchFrame(time_ms=f.time_ms + shift, x=f.x,
+                                      dashing=f.dashing) for f in frames]
+            print(f"[catch] replay timeline shift {shift:+d}ms applied "
+                  f"(catcher alignment {base * 100:.0f}% -> {best * 100:.0f}%)",
+                  file=sys.stderr, flush=True)
 
     def _simulate(self) -> None:
         import math
