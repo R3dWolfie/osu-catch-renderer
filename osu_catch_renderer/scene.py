@@ -550,14 +550,14 @@ class CatchSim:
                 p = (age - 200.0) / 600.0
                 sy = (20.0 * cs) + (1.0 - 20.0 * cs) * (p * p)
             beam_h = base * sy
-            beam_w = max(5.0, base * 0.85)   # soft-edged texture, so a bit wider
+            beam_w = max(4.0, base * 0.7)    # thin glow streak (lazer is glow-only)
             gtint = tuple(c + (1.0 - c) * 0.2 for c in tint)
             gsize = self.fruit_screen * 1.3
             out.append(Sprite(sx, self.plane_y, gsize, gsize, texture_key="catch_glow",
-                              color=(gtint[0], gtint[1], gtint[2], alpha * 0.45),
+                              color=(gtint[0], gtint[1], gtint[2], alpha * 0.30),
                               additive=True))
             out.append(Sprite(sx, self.plane_y - beam_h / 2.0, beam_w, beam_h,
                               texture_key="catch_beam",
-                              color=(tint[0], tint[1], tint[2], alpha * 0.9),
+                              color=(tint[0], tint[1], tint[2], alpha * 0.35),
                               additive=True))
         return out
