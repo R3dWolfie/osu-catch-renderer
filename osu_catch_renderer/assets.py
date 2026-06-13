@@ -58,6 +58,21 @@ def _catcher() -> np.ndarray:
     return np.array(img)
 
 
+def catch_glow_rgba(size: int = 128) -> np.ndarray:
+    """Soft white radial glow (alpha falloff), tinted/additive at draw time."""
+    import math
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    px = img.load()
+    c = (size - 1) / 2.0
+    for y in range(size):
+        for x in range(size):
+            d = math.hypot(x - c, y - c) / c
+            a = max(0.0, 1.0 - d)
+            a = a * a * a
+            px[x, y] = (255, 255, 255, int(255 * a))
+    return np.array(img)
+
+
 def build_textures() -> dict[str, np.ndarray]:
     tex: dict[str, np.ndarray] = {}
     for i, c in enumerate(COMBO_COLORS):

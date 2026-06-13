@@ -118,17 +118,32 @@ class SpriteRenderer:
         self.ctx.clear(*clear)
 
     def draw(self, sprites: list[Sprite]) -> None:
+        # Painter's order for the normal (straight-alpha) sprites, then an
+        # additive pass on top for glow/explosion sprites (lazer draws hit
+        # explosions & catcher trails additively).
+        add = []
         for sp in sprites:
-            tex = self._textures.get(sp.texture_key) if sp.texture_key else self._white
-            if tex is None:
-                tex = self._white
-            tex.use(location=0)
-            self.prog["u_tex"].value = 0
-            self.prog["u_color"].value = sp.color
-            self.prog["u_center"].value = (sp.x, sp.y)
-            self.prog["u_size"].value = (sp.w, sp.h)
-            self.prog["u_rot"].value = sp.rotation
-            self.vao.render(moderngl.TRIANGLE_STRIP)
+            if sp.additive:
+                add.append(sp)
+            else:
+                self._draw_one(sp)
+        if add:
+            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE)
+            for sp in add:
+                self._draw_one(sp)
+            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+
+    def _draw_one(self, sp: Sprite) -> None:
+        tex = self._textures.get(sp.texture_key) if sp.texture_key else self._white
+        if tex is None:
+            tex = self._white
+        tex.use(location=0)
+        self.prog["u_tex"].value = 0
+        self.prog["u_color"].value = sp.color
+        self.prog["u_center"].value = (sp.x, sp.y)
+        self.prog["u_size"].value = (sp.w, sp.h)
+        self.prog["u_rot"].value = sp.rotation
+        self.vao.render(moderngl.TRIANGLE_STRIP)
 
     def read_rgb(self) -> np.ndarray:
         """Return HxWx3 uint8, top-left origin (ready for ffmpeg rgb24)."""

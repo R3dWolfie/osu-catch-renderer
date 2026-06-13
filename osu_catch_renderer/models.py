@@ -139,6 +139,7 @@ class Sprite:
     texture_key: str | None = None      # atlas key; None = solid colour quad
     color: tuple[float, float, float, float] = (1, 1, 1, 1)
     rotation: float = 0.0
+    additive: bool = False           # additive blend (glow / catch explosion)
 
 
 @dataclass

@@ -97,7 +97,7 @@ class CatchSim:
 
         self._caught: list[bool] = []
         self._checkpoints: list[_Checkpoint] = []
-        self._catches: list[tuple[int, int, bool]] = []   # (time, combo_index, hyper)
+        self._catches: list = []   # (time, x, combo_index, hyper, combo)
         self._hyper_windows: list[tuple[int, int]] = []    # catcher glows red in these
         self._calibrate_offset()
         self._simulate()
@@ -218,7 +218,7 @@ class CatchSim:
                     hp = min(1.0, hp + 0.025)
                     if obj.kind is ObjType.FRUIT:
                         c300 += 1
-                        self._catches.append((obj.time_ms, obj.combo_index, obj.hyperdash))
+                        self._catches.append((obj.time_ms, obj.x, obj.combo_index, obj.hyperdash, combo))
                     else:
                         c100 += 1
                     if obj.hyperdash:
@@ -322,6 +322,7 @@ class CatchSim:
             s.sprites.extend(self._dash_trail(t_ms, hyper))
         s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper))
         s.sprites.extend(self._plate_stack(scx, t_ms))
+        s.sprites.extend(self._catch_explosions(t_ms))
 
         # letterbox + dim during breaks (drawn last so bars sit on top)
         if self.cfg.letterbox_breaks and any(a <= t_ms <= b for a, b in self.bm.breaks):
@@ -501,7 +502,7 @@ class CatchSim:
         plate_half = self.half * self.x_scale
         out: list[Sprite] = []
         recent = [c for c in self._catches if 0 <= t_ms - c[0] <= STACK_MS][-12:]
-        for ct, ci, hy in recent:
+        for ct, cx, ci, hy, cmb in recent:
             alpha = 1.0 - (t_ms - ct) / STACK_MS
             ox = (((ct * 131) % 100) / 100 - 0.5) * plate_half * 1.4
             oy = -(((ct * 73) % 4)) * self.fruit_screen * 0.10
@@ -510,4 +511,53 @@ class CatchSim:
             key = self.skin.fruit_key(ci)
             out.append(Sprite(scx + ox, self.plane_y + self.fruit_screen * 0.15 + oy,
                               size, size, texture_key=key, color=(*tint, alpha)))
+        return out
+
+    def _catch_explosions(self, t_ms) -> list[Sprite]:
+        """lazer catch ArgonHitExplosion: every caught FRUIT fires a coloured
+        vertical light beam up from the catch point + a soft glow, additive,
+        fading over 400ms. The beam shoots up (200ms OutQuint) then retracts
+        (600ms In); its peak height scales with the combo at the catch. Droplets
+        don't explode (matches lazer)."""
+        cts = getattr(self, "_catch_times", None)
+        if cts is None:
+            cts = self._catch_times = [c[0] for c in self._catches]
+        import bisect
+        lo = bisect.bisect_left(cts, t_ms - 400)
+        hi = bisect.bisect_right(cts, t_ms)
+        out: list[Sprite] = []
+        base = self.fruit_screen * (20.0 / 128.0)     # explosion Size 20 vs OBJECT 128
+        for i in range(lo, hi):
+            ct, cx, ci, hy, cmb = self._catches[i]
+            age = t_ms - ct
+            if age < 0:
+                continue
+            alpha = 1.0 - age / 400.0
+            if alpha <= 0.0:
+                continue
+            sx = self._sx(cx)
+            if hy:
+                tint = (1.0, 0.45, 0.45)
+            elif self.skin is not None:
+                tint = self.skin.combo_color(ci)
+            else:
+                tint = (1.0, 1.0, 1.0)
+            cs = min(max(cmb / 200.0, 0.35), 1.125)
+            if age < 200:
+                p = age / 200.0
+                sy = 1.0 + (20.0 * cs - 1.0) * (1.0 - (1.0 - p) ** 5)
+            else:
+                p = (age - 200.0) / 600.0
+                sy = (20.0 * cs) + (1.0 - 20.0 * cs) * (p * p)
+            beam_h = base * sy
+            beam_w = max(3.0, base * 0.5)
+            gtint = tuple(c + (1.0 - c) * 0.2 for c in tint)
+            gsize = self.fruit_screen * 1.3
+            out.append(Sprite(sx, self.plane_y, gsize, gsize, texture_key="catch_glow",
+                              color=(gtint[0], gtint[1], gtint[2], alpha * 0.45),
+                              additive=True))
+            out.append(Sprite(sx, self.plane_y - beam_h / 2.0, beam_w, beam_h,
+                              texture_key=None,
+                              color=(tint[0], tint[1], tint[2], alpha * 0.85),
+                              additive=True))
         return out

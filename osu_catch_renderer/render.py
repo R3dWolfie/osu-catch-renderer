@@ -122,6 +122,8 @@ def render_core(
     # lazer-base catcher plate (procedural; used regardless of skin for now)
     from .lazer_skin import catcher_rgba
     renderer.upload_texture("lazer_catcher", catcher_rgba())
+    from .assets import catch_glow_rgba
+    renderer.upload_texture("catch_glow", catch_glow_rgba())
     if bg is not None:
         renderer.upload_texture("bg", _bg_cover(bg, w, h, cfg.bg_blur))
 
