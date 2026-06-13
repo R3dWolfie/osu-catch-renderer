@@ -353,6 +353,15 @@ class CatchSim:
             rbm = rosu.Beatmap(path=str(osu_path))
         except Exception:
             return
+        # Catch is frequently played on converted osu!standard maps. Without
+        # converting, rosu computes the *osu!standard* pp from the catch hit
+        # counts -- roughly 2x wrong. Convert to the Catch ruleset so the pp
+        # matches the game. Native-catch maps are left as-is.
+        try:
+            if rbm.mode != rosu.GameMode.Catch:
+                rbm.convert(rosu.GameMode.Catch, int(mods))
+        except Exception:
+            pass
         n = len(cps)
         step = max(1, n // 80)
         samples = {}
@@ -366,14 +375,18 @@ class CatchSim:
                 ).calculate(rbm).pp
             except Exception:
                 samples[i] = samples.get(i - step, 0.0)
-        # final point = the authoritative full-play pp
-        try:
-            c3, c1, c5, tmiss, miss = cps[-1].counts
-            samples[n - 1] = rosu.Performance(
-                mods=int(mods), n300=c3, n100=c1, n50=c5, n_katu=tmiss,
-                misses=miss, combo=cps[-1].max_combo).calculate(rbm).pp
-        except Exception:
-            pass
+        # final point = the authoritative full-play pp, taken straight from
+        # the replay's own counts + max combo (not the geometric sim, which
+        # only approximates per-type counts and combo).
+        m = self.meta
+        if m is not None:
+            try:
+                samples[n - 1] = rosu.Performance(
+                    mods=int(mods), n300=m.count_300, n100=m.count_100,
+                    n50=m.count_50, n_katu=m.count_katu, misses=m.count_miss,
+                    combo=m.max_combo).calculate(rbm).pp
+            except Exception:
+                pass
         keys = sorted(samples)
         for i, cp in enumerate(cps):  # linear-interp pp between sampled checkpoints
             if i in samples:
