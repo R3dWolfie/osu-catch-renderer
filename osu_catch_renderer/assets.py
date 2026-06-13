@@ -73,6 +73,21 @@ def catch_glow_rgba(size: int = 128) -> np.ndarray:
     return np.array(img)
 
 
+def catch_beam_rgba(w: int = 48, h: int = 256) -> np.ndarray:
+    """Soft vertical light shaft for the catch hit explosion: bright centre
+    column with a gaussian-ish horizontal falloff (so the edges glow instead of
+    being hard lines) and a tapered top so the beam tip fades out."""
+    xs = np.abs(np.arange(w) - (w - 1) / 2.0) / ((w - 1) / 2.0)
+    hf = np.clip(1.0 - xs, 0.0, 1.0) ** 1.7          # horizontal soft falloff
+    ys = np.arange(h) / (h - 1)                        # 0 (top) .. 1 (bottom)
+    vf = np.clip(ys, 0.0, 1.0) ** 0.5                  # bright at base, soft tip
+    a = (vf[:, None] * hf[None, :] * 255.0).astype(np.uint8)
+    img = np.zeros((h, w, 4), dtype=np.uint8)
+    img[..., 0] = 255; img[..., 1] = 255; img[..., 2] = 255
+    img[..., 3] = a
+    return img
+
+
 def build_textures() -> dict[str, np.ndarray]:
     tex: dict[str, np.ndarray] = {}
     for i, c in enumerate(COMBO_COLORS):
