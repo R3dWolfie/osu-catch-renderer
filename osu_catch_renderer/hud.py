@@ -93,42 +93,46 @@ class DanserHud:
         k = self.argon_hp.k
         tube_bottom = int(self.argon_hp.bg.oy + 20 * k)        # bar tube bottom (left)
         right_pad = int(0.018 * W)
+        # glyph content occupies rows 31..209 of the 240 cell (top/bottom pad 31)
+        _CTOP, _CBOT = 31.0 / 240.0, 209.0 / 240.0
         if _on("show_score"):
-            wedge_y = tube_bottom + int(0.004 * H)
+            s_cell = int(H * 0.067)
+            wedge_y = tube_bottom + int(0.002 * H)
             self._argon_wedge(img, int(0.010 * W), wedge_y,
-                              int(0.30 * W), int(0.080 * H))
-            s_cell = int(H * 0.072)
+                              int(0.30 * W), int(0.078 * H))
             s_img = af.render(f"{scene.score}", s_cell, tint=(1.0, 1.0, 1.0),
                               min_slots=max(6, len(str(scene.score))))
-            img.paste(s_img, (int(0.040 * W), tube_bottom + int(0.010 * H)), s_img)
+            # content top at ~0.054H
+            sy = int(0.054 * H - _CTOP * s_cell)
+            img.paste(s_img, (int(0.040 * W), sy), s_img)
 
         # ---- ACCURACY (top-right) ----
         acc_bottom = pad
         if _on("show_score"):
-            a_cell = int(H * 0.072)
+            a_cell = int(H * 0.038)
             a_img = af.render(f"{scene.accuracy * 100:.2f}%", a_cell, tint=(1.0, 1.0, 1.0))
-            ay = int(H * 0.056)
+            ay = int(0.052 * H - _CTOP * a_cell)          # content top ~0.052H
             ax = W - right_pad - a_img.width
             self._argon_label(img, "ACCURACY", int(H * 0.034), right_x=W - right_pad)
             img.paste(a_img, (ax, ay), a_img)
-            acc_bottom = ay + a_img.height
+            acc_bottom = ay + int(_CBOT * a_cell)
 
         # ---- PP (top-right, under accuracy) ----
         if cfg is not None and getattr(cfg, "show_pp_counter", False) and scene.pp > 0:
-            p_cell = int(H * 0.054)
+            p_cell = int(H * 0.034)
             p_img = af.render(f"{scene.pp:.0f}", p_cell, tint=(1.0, 1.0, 1.0))
-            py = acc_bottom + int(H * 0.026)
-            self._argon_label(img, "PP", py - int(H * 0.024), right_x=W - right_pad)
+            py = acc_bottom + int(H * 0.020)
+            self._argon_label(img, "PP", py - int(H * 0.020), right_x=W - right_pad)
             img.paste(p_img, (W - right_pad - p_img.width, py), p_img)
 
         # ---- COMBO (bottom-left) ----
         if scene.combo > 0 and _on("show_combo"):
-            c_cell = int(H * 0.160)
+            c_cell = int(H * 0.051)
             c_img = af.render(f"{scene.combo}x", c_cell, tint=(1.0, 1.0, 1.0))
-            cx = int(0.030 * W)
-            cby = int(H * 0.955)
-            cy = cby - c_img.height
-            self._argon_label(img, "COMBO", cy - int(H * 0.005), left_x=cx)
+            cx = int(0.029 * W)
+            # content bottom at ~0.92H (lazer bottom-left combo)
+            cy = int(0.920 * H - _CBOT * c_cell)
+            self._argon_label(img, "COMBO", cy + int(_CTOP * c_cell) - int(H * 0.020), left_x=cx)
             img.paste(c_img, (cx, cy), c_img)
 
         # progress bar (bottom edge)
