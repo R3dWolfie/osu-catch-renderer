@@ -74,6 +74,16 @@ class DanserHud:
         def _on(n):
             return cfg is None or getattr(cfg, n, True)
 
+        # ---- SCORE WEDGE (translucent panel UNDER the bar + score) ----
+        # lazer stacks several ArgonWedgePieces; draw two offset pieces so the
+        # overlap reads as a panel (faithful to ArgonSkin's wedgePieces).
+        if _on("show_score") or _on("show_hp_bar"):
+            oy = self.argon_hp.bg.oy
+            wy = int(oy - 0.004 * H)
+            ww, wh = int(0.255 * W), int(0.130 * H)
+            self._argon_wedge(img, int(-0.020 * W), wy, ww, wh)
+            self._argon_wedge(img, int(0.008 * W), wy, ww, wh)
+
         # ---- HEALTH BAR (top-left) ----
         if _on("show_hp_bar"):
             t = scene.time_ms
@@ -97,24 +107,28 @@ class DanserHud:
         _CTOP, _CBOT = 31.0 / 240.0, 209.0 / 240.0
         if _on("show_score"):
             s_cell = int(H * 0.067)
-            wedge_y = tube_bottom + int(0.002 * H)
-            self._argon_wedge(img, int(0.010 * W), wedge_y,
-                              int(0.30 * W), int(0.078 * H))
             s_img = af.render(f"{scene.score}", s_cell, tint=(1.0, 1.0, 1.0),
                               min_slots=max(6, len(str(scene.score))))
             # content top at ~0.054H
             sy = int(0.054 * H - _CTOP * s_cell)
             img.paste(s_img, (int(0.040 * W), sy), s_img)
 
-        # ---- ACCURACY (top-right) ----
+        # ---- ACCURACY (top-right) — integer big, ".00%" smaller & raised ----
         acc_bottom = pad
         if _on("show_score"):
-            a_cell = int(H * 0.038)
-            a_img = af.render(f"{scene.accuracy * 100:.2f}%", a_cell, tint=(1.0, 1.0, 1.0))
+            a_cell = int(H * 0.040)
+            f_cell = int(a_cell * 0.60)
+            acc_str = f"{scene.accuracy * 100:.2f}"
+            int_part, frac_part = acc_str.split(".")
+            a_int = af.render(int_part, a_cell, tint=(1.0, 1.0, 1.0))
+            a_frac = af.render("." + frac_part + "%", f_cell, tint=(1.0, 1.0, 1.0))
             ay = int(0.052 * H - _CTOP * a_cell)          # content top ~0.052H
-            ax = W - right_pad - a_img.width
-            self._argon_label(img, "ACCURACY", int(H * 0.034), right_x=W - right_pad)
-            img.paste(a_img, (ax, ay), a_img)
+            right = W - right_pad
+            # frac content-top aligned to int content-top (superscript look)
+            fy = ay + int(_CTOP * a_cell - _CTOP * f_cell)
+            img.paste(a_frac, (right - a_frac.width, fy), a_frac)
+            img.paste(a_int, (right - a_frac.width - a_int.width, ay), a_int)
+            self._argon_label(img, "ACCURACY", int(H * 0.034), right_x=right)
             acc_bottom = ay + int(_CBOT * a_cell)
 
         # ---- PP (top-right, under accuracy) ----
@@ -149,14 +163,17 @@ class DanserHud:
         return np.asarray(img)
 
     def _argon_label(self, img, text, y, *, left_x=None, right_x=None):
-        """Small Torus-style caps label above a counter."""
+        """Small Torus-style caps label above a counter (light tracking)."""
         d = ImageDraw.Draw(img)
-        lf = _font(int(self.h * 0.018))
-        txt = " ".join(text.upper())          # light letter-spacing
-        bb = d.textbbox((0, 0), txt, font=lf)
-        tw = bb[2] - bb[0]
-        x = (right_x - tw) if right_x is not None else left_x
-        d.text((x, y), txt, font=lf, fill=(205, 216, 230))
+        lf = _font(int(self.h * 0.016))
+        chars = text.upper()
+        track = max(1, int(self.h * 0.0035))      # subtle letter-spacing
+        widths = [d.textlength(c, font=lf) for c in chars]
+        total = sum(widths) + track * (len(chars) - 1)
+        x = (right_x - total) if right_x is not None else left_x
+        for c, w in zip(chars, widths):
+            d.text((x, y), c, font=lf, fill=(202, 214, 230))
+            x += w + track
 
     def _argon_wedge(self, img, x, y, w, h):
         """ArgonWedgePiece — sheared (0.8) translucent #66CCFF panel, vertical
