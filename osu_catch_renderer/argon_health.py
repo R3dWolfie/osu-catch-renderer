@@ -187,7 +187,7 @@ def _colour_bg(d, R):
 class ArgonHealth:
     """Stateful per-render Argon health bar. Call update_draw() each frame."""
 
-    def __init__(self, w: int, h: int, width_frac: float = 0.235,
+    def __init__(self, w: int, h: int, width_frac: float = 0.248,
                  left_frac: float = 0.012, top_frac: float = 0.012):
         self.w, self.h = w, h
         # lazer's default Argon skin pins the health bar to a fixed Width=300
