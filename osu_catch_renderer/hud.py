@@ -57,75 +57,24 @@ class DanserHud:
         from .argon_health import ArgonHealth
         self.argon_hp = ArgonHealth(self.w, self.h)
         self._hp_last_t = None
+        from .argon_counter import ArgonFont
+        self.argon_font = ArgonFont(Path(__file__).parent / "argon_assets")
 
     # --- public ---------------------------------------------------------------
 
     def overlay(self, rgb: np.ndarray, scene) -> np.ndarray:
+        # Faithful osu!lazer **Argon** HUD layout (ArgonSkin.cs): health bar +
+        # score top-left (in a sheared wedge), combo bottom-left, accuracy + pp
+        # top-right — all in the real `argon-counter` texture font.
         img = Image.fromarray(rgb, "RGB")
         pad = int(self.w * 0.012)
+        W, H = self.w, self.h
+        af = self.argon_font
         cfg = self.cfg
         def _on(n):
             return cfg is None or getattr(cfg, n, True)
 
-        # score (top-right, no leading zeros). Images are built either way so the
-        # layout (y / mods_y / pp rows) stays consistent; only the paste is gated.
-        score_img = self._number(f"{scene.score}", self.score_glyphs, overlap=1)
-        if _on("show_score"):
-            self._paste(img, score_img, self.w - pad - score_img.width, pad)
-        y = pad + score_img.height + int(self.h * 0.008)
-
-        # accuracy (under score, right-aligned) + grade to its left
-        acc_img = self._number(f"{scene.accuracy * 100:.2f}%", self.acc_glyphs, overlap=1)
-        if _on("show_score"):
-            self._paste(img, acc_img, self.w - pad - acc_img.width, y)
-        grade = self.grades.get(self._grade(scene.accuracy))
-        if grade is not None and _on("show_grade"):
-            self._paste(img, grade, self.w - pad - acc_img.width - grade.width - 8,
-                        y - (grade.height - acc_img.height) // 2)
-
-        # mods row (under accuracy)
-        mods_y = y + acc_img.height + int(self.h * 0.01)
-        if _on("show_mods"):
-            mx = self.w - pad
-            for m in self.mod_imgs:
-                mx -= m.width + 4
-                self._paste(img, m, mx, mods_y)
-
-        # pp counter + hit counter (top-right, under the mods row)
-        ry = mods_y + int(self.h * 0.052) + int(self.h * 0.015)
-        cfg = self.cfg
-        if cfg is not None and getattr(cfg, "show_pp_counter", False) and scene.pp > 0:
-            d = ImageDraw.Draw(img)
-            txt = f"{scene.pp:.0f}pp"
-            pf = _font(int(self.h * 0.032))
-            bb = d.textbbox((0, 0), txt, font=pf)
-            d.text((self.w - pad - (bb[2] - bb[0]), ry), txt, font=pf, fill=(245, 235, 255))
-            ry += int(self.h * 0.045)
-        if cfg is not None and getattr(cfg, "show_hit_counter", False):
-            c300, c100, c50, _tmiss, miss = scene.counts
-            d = ImageDraw.Draw(img)
-            hf = _font(int(self.h * 0.024))
-            for label, val, col in (("300", c300, (110, 200, 255)),
-                                    ("100", c100, (130, 255, 160)),
-                                    ("50", c50, (255, 225, 120)),
-                                    ("Miss", miss, (255, 110, 110))):
-                txt = f"{val}x {label}"
-                bb = d.textbbox((0, 0), txt, font=hf)
-                d.text((self.w - pad - (bb[2] - bb[0]), ry), txt, font=hf, fill=col)
-                ry += int(self.h * 0.03)
-
-        # combo (large white number, centre-screen — lazer base look)
-        if scene.combo > 0 and _on("show_combo"):
-            d = ImageDraw.Draw(img)
-            txt = str(scene.combo)
-            f = _font(int(self.h * 0.117))
-            bbox = d.textbbox((0, 0), txt, font=f)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            cx, cy = self.w * 0.5, self.h * 0.44
-            d.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), txt,
-                   font=f, fill=(247, 247, 248))
-
-        # HP bar (osu!lazer Argon) — top, full width, ported from lazer source
+        # ---- HEALTH BAR (top-left) ----
         if _on("show_hp_bar"):
             t = scene.time_ms
             dt = 16.0 if self._hp_last_t is None else max(0.0, min(100.0, t - self._hp_last_t))
@@ -133,26 +82,90 @@ class DanserHud:
             arr = np.asarray(img).copy()
             self.argon_hp.update_draw(arr, scene.hp, dt)
             img = Image.fromarray(arr)
+            # little 45x3 "healthLine" dash to the left of the bar (lazer detail)
+            k = self.argon_hp.k
+            ly = int(self.argon_hp.bg.oy + 10 * k)
+            lx = int(0.010 * W)
+            d = ImageDraw.Draw(img)
+            d.line([(lx, ly), (lx + int(45 * k), ly)], fill=(235, 235, 240), width=max(2, int(3 * k)))
+
+        # ---- SCORE (top-left, in the wedge) ----
+        bar_bottom = int(self.argon_hp.bg.oy + (60 * self.argon_hp.k))
+        if _on("show_score"):
+            wedge_y = bar_bottom + int(0.004 * H)
+            self._argon_wedge(img, int(0.012 * W), wedge_y,
+                              int(0.30 * W), int(0.085 * H))
+            s_cell = int(H * 0.075)
+            s_img = af.render(f"{scene.score}", s_cell, tint=(1.0, 1.0, 1.0),
+                              min_slots=max(6, len(str(scene.score))))
+            img.paste(s_img, (int(0.030 * W), wedge_y + int(0.004 * H)), s_img)
+
+        # ---- ACCURACY (top-right) ----
+        acc_bottom = pad
+        if _on("show_score"):
+            a_cell = int(H * 0.052)
+            a_img = af.render(f"{scene.accuracy * 100:.2f}%", a_cell, tint=(1.0, 1.0, 1.0))
+            ax, ay = W - pad - a_img.width, int(H * 0.044)
+            self._argon_label(img, "ACCURACY", ay - int(H * 0.024), right_x=W - pad)
+            img.paste(a_img, (ax, ay), a_img)
+            acc_bottom = ay + a_img.height
+
+        # ---- PP (top-right, under accuracy) ----
+        if cfg is not None and getattr(cfg, "show_pp_counter", False) and scene.pp > 0:
+            p_cell = int(H * 0.046)
+            p_img = af.render(f"{scene.pp:.0f}", p_cell, tint=(1.0, 1.0, 1.0))
+            py = acc_bottom + int(H * 0.020)
+            self._argon_label(img, "PP", py - int(H * 0.022), right_x=W - pad)
+            img.paste(p_img, (W - pad - p_img.width, py), p_img)
+
+        # ---- COMBO (bottom-left) ----
+        if scene.combo > 0 and _on("show_combo"):
+            c_cell = int(H * 0.090)
+            c_img = af.render(f"{scene.combo}x", c_cell, tint=(1.0, 1.0, 1.0))
+            cx = int(0.028 * W)
+            cby = int(H * 0.965)
+            cy = cby - c_img.height
+            self._argon_label(img, "COMBO", cy - int(H * 0.004), left_x=cx)
+            img.paste(c_img, (cx, cy), c_img)
 
         # progress bar (bottom edge)
         self._draw_progress(img, scene.time_ms)
 
-        # player + title (top-left, under scorebar)
-        d = ImageDraw.Draw(img)
-        ty = int(self.h * 0.075)
-        d.text((pad, ty), self.meta.player_name, font=self.font, fill=(245, 245, 250))
-        title = f"{self.bm.artist} - {self.bm.title} [{self.bm.version}]".strip(" -")
-        title = _ellipsize(d, title, self.font_small, self.w - pad * 2)
-        d.text((pad, ty + int(self.h * 0.03)), title, font=self.font_small, fill=(190, 190, 205))
-
         # watermark (bottom-right) — free renders are forced to the site URL
         wm = getattr(self.cfg, "watermark", "") if self.cfg else ""
         if wm:
+            d = ImageDraw.Draw(img)
             wmf = _font(int(self.h * 0.022))
             wb = d.textbbox((0, 0), wm, font=wmf)
             d.text((self.w - pad - (wb[2] - wb[0]), self.h - pad - (wb[3] - wb[1]) - int(self.h * 0.006)),
                    wm, font=wmf, fill=(238, 238, 245))
         return np.asarray(img)
+
+    def _argon_label(self, img, text, y, *, left_x=None, right_x=None):
+        """Small Torus-style caps label above a counter."""
+        d = ImageDraw.Draw(img)
+        lf = _font(int(self.h * 0.018))
+        txt = " ".join(text.upper())          # light letter-spacing
+        bb = d.textbbox((0, 0), txt, font=lf)
+        tw = bb[2] - bb[0]
+        x = (right_x - tw) if right_x is not None else left_x
+        d.text((x, y), txt, font=lf, fill=(205, 216, 230))
+
+    def _argon_wedge(self, img, x, y, w, h):
+        """ArgonWedgePiece — sheared (0.8) translucent #66CCFF panel, vertical
+        gradient alpha 0 (top) -> 0.25 (bottom)."""
+        skew = 0.8 * h
+        W2 = int(w + skew) + 2
+        grid_y = np.arange(h)[:, None].astype(np.float32)
+        grid_x = np.arange(W2)[None, :].astype(np.float32)
+        x_left = skew * (1.0 - grid_y / max(h, 1))          # top shifted right
+        inside = (grid_x >= x_left) & (grid_x < x_left + w)
+        alpha = (0.25 * (grid_y / max(h, 1)) * 255.0) * inside
+        rgba = np.zeros((h, W2, 4), np.uint8)
+        rgba[..., 0] = 0x66; rgba[..., 1] = 0xCC; rgba[..., 2] = 0xFF
+        rgba[..., 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+        wedge = Image.fromarray(rgba, "RGBA")
+        img.paste(wedge, (int(x), int(y)), wedge)
 
     # --- compositing helpers --------------------------------------------------
 
