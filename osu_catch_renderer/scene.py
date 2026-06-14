@@ -414,9 +414,45 @@ class CatchSim:
         return 0.0 if a < 0.0 else (1.0 if a > 1.0 else a)
 
     def _object_sprites(self, obj, x, y, t_ms) -> list[Sprite]:
-        if self.skin is not None:
-            return self._skinned_object(obj, x, y, t_ms)
-        return [self._procedural_object(obj, x, y)]
+        # lazer Argon look: procedural organic ring + white centre dot + glow
+        # (ArgonFruitPiece), NOT skin fruit icons.
+        return self._argon_object(obj, x, y, t_ms)
+
+    def _argon_object(self, obj, x, y, t_ms) -> list[Sprite]:
+        fs = self.fruit_screen
+        if obj.kind is ObjType.TINY_DROPLET:
+            size = fs * 0.34
+        elif obj.kind is ObjType.DROPLET:
+            size = fs * 0.58
+        else:
+            size = fs * 1.05
+        hyper = (obj.kind is ObjType.FRUIT and obj.hyperdash
+                 and self.cfg.show_hyperdash)
+        if obj.kind is ObjType.BANANA:
+            tint = (_hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
+                    if self.cfg.banana_rainbow else (1.0, 0.85, 0.15))
+        elif hyper:
+            tint = (1.0, 0.30, 0.30)
+        elif self.skin is not None:
+            tint = self.skin.combo_color(obj.combo_index)
+        else:
+            tint = _hue((obj.combo_index * 0.13) % 1.0)
+        out = [
+            # additive glow behind
+            Sprite(x, y, size * 1.5, size * 1.5, texture_key="catch_glow",
+                   color=(tint[0], tint[1], tint[2], 0.45), additive=True),
+            # organic colored ring (additive)
+            Sprite(x, y, size, size, texture_key="argon_fruit_ring",
+                   color=(tint[0], tint[1], tint[2], 0.95), additive=True),
+        ]
+        if hyper:
+            out.append(Sprite(x, y, size * 1.18, size * 1.18,
+                              texture_key="argon_fruit_ring",
+                              color=(1.0, 0.35, 0.35, 0.9), additive=True))
+        # white centre dot
+        out.append(Sprite(x, y, size * 0.20, size * 0.20,
+                          texture_key="argon_fruit_dot", color=(1, 1, 1, 1)))
+        return out
 
     def _skinned_object(self, obj, x, y, t_ms) -> list[Sprite]:
         sk = self.skin
@@ -495,9 +531,7 @@ class CatchSim:
                        texture_key="lazer_catcher", color=tint)]
 
     def _plate_stack(self, scx, t_ms) -> list[Sprite]:
-        """Caught fruit piled on the plate, riding with the catcher and fading."""
-        if self.skin is None:
-            return []
+        """Caught fruit piled on the plate (procedural Argon rings), fading."""
         STACK_MS = 850
         plate_half = self.half * self.x_scale
         out: list[Sprite] = []
@@ -506,11 +540,15 @@ class CatchSim:
             alpha = 1.0 - (t_ms - ct) / STACK_MS
             ox = (((ct * 131) % 100) / 100 - 0.5) * plate_half * 1.4
             oy = -(((ct * 73) % 4)) * self.fruit_screen * 0.10
-            size = self.fruit_screen * 0.55
-            tint = (1.0, 0.35, 0.35) if hy else self.skin.combo_color(ci)
-            key = self.skin.fruit_key(ci)
-            out.append(Sprite(scx + ox, self.plane_y + self.fruit_screen * 0.15 + oy,
-                              size, size, texture_key=key, color=(*tint, alpha)))
+            size = self.fruit_screen * 0.50
+            tint = ((1.0, 0.35, 0.35) if hy
+                    else (self.skin.combo_color(ci) if self.skin is not None
+                          else _hue((ci * 0.13) % 1.0)))
+            py = self.plane_y + self.fruit_screen * 0.15 + oy
+            out.append(Sprite(scx + ox, py, size, size, texture_key="argon_fruit_ring",
+                              color=(tint[0], tint[1], tint[2], 0.9 * alpha), additive=True))
+            out.append(Sprite(scx + ox, py, size * 0.20, size * 0.20,
+                              texture_key="argon_fruit_dot", color=(1, 1, 1, alpha)))
         return out
 
     def _catch_explosions(self, t_ms) -> list[Sprite]:

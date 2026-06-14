@@ -88,6 +88,38 @@ def catch_beam_rgba(w: int = 48, h: int = 256) -> np.ndarray:
     return img
 
 
+def argon_fruit_ring_rgba(n: int = 160) -> np.ndarray:
+    """lazer ArgonFruitPiece outline: an organic (slightly wavy) white ring,
+    tinted per-combo + additive at draw. Approximates CircularBlob."""
+    yy, xx = np.mgrid[0:n, 0:n]
+    c = (n - 1) / 2.0
+    dx = xx - c; dy = yy - c
+    d = np.hypot(dx, dy)
+    ang = np.arctan2(dy, dx)
+    base_r = n * 0.40
+    thick = n * 0.085
+    r = base_r * (1.0 + 0.055 * np.sin(ang * 5 + 0.7)
+                  + 0.03 * np.sin(ang * 3 + 2.1)
+                  + 0.022 * np.sin(ang * 8 + 4.0))
+    a = np.clip(1.0 - np.abs(d - r) / thick, 0.0, 1.0) ** 1.4
+    img = np.zeros((n, n, 4), dtype=np.uint8)
+    img[..., 0] = 255; img[..., 1] = 255; img[..., 2] = 255
+    img[..., 3] = (a * 255).astype(np.uint8)
+    return img
+
+
+def argon_fruit_dot_rgba(n: int = 64) -> np.ndarray:
+    """Small solid white centre dot (lazer ArgonFruitPiece core Circle)."""
+    yy, xx = np.mgrid[0:n, 0:n]
+    c = (n - 1) / 2.0
+    d = np.hypot(xx - c, yy - c) / (n * 0.5)
+    a = np.where(d < 0.6, 1.0, np.clip(1.0 - (d - 0.6) / 0.4, 0.0, 1.0) ** 2)
+    img = np.zeros((n, n, 4), dtype=np.uint8)
+    img[..., :3] = 255
+    img[..., 3] = (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    return img
+
+
 def build_textures() -> dict[str, np.ndarray]:
     tex: dict[str, np.ndarray] = {}
     for i, c in enumerate(COMBO_COLORS):
