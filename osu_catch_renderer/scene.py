@@ -431,25 +431,29 @@ class CatchSim:
         if obj.kind is ObjType.BANANA:
             tint = (_hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
                     if self.cfg.banana_rainbow else (1.0, 0.85, 0.15))
-        elif hyper:
-            tint = (1.0, 0.30, 0.30)
         elif self.skin is not None:
-            tint = self.skin.combo_color(obj.combo_index)
+            tint = self.skin.combo_color(obj.combo_index)  # hyper keeps its colour
         else:
             tint = _hue((obj.combo_index * 0.13) % 1.0)
+        # Per-fruit organic variation: unique base rotation + gentle spin so the
+        # wavy ring looks different on every fruit (lazer seeds CircularBlob).
+        seed = (int(obj.time_ms) * 2654435761) ^ (int(obj.x * 53) & 0xFFFF)
+        base_ang = (seed % 628) / 100.0
+        spin_dir = 1.0 if (seed >> 4) & 1 else -1.0
+        rot = base_ang + (t_ms - obj.time_ms + self.preempt) * 0.0006 * spin_dir
         out = [
-            # additive glow behind
             Sprite(x, y, size * 1.5, size * 1.5, texture_key="catch_glow",
                    color=(tint[0], tint[1], tint[2], 0.45), additive=True),
-            # organic colored ring (additive)
             Sprite(x, y, size, size, texture_key="argon_fruit_ring",
-                   color=(tint[0], tint[1], tint[2], 0.95), additive=True),
+                   color=(tint[0], tint[1], tint[2], 0.95), additive=True,
+                   rotation=rot),
         ]
         if hyper:
-            out.append(Sprite(x, y, size * 1.18, size * 1.18,
+            # lazer HyperBorderPiece: combo-coloured fruit + a red ring around it
+            out.append(Sprite(x, y, size * 1.22, size * 1.22,
                               texture_key="argon_fruit_ring",
-                              color=(1.0, 0.35, 0.35, 0.9), additive=True))
-        # white centre dot
+                              color=(1.0, 0.30, 0.30, 0.9), additive=True,
+                              rotation=-rot * 0.6))
         out.append(Sprite(x, y, size * 0.20, size * 0.20,
                           texture_key="argon_fruit_dot", color=(1, 1, 1, 1)))
         return out
@@ -580,22 +584,9 @@ class CatchSim:
                 tint = self.skin.combo_color(ci)
             else:
                 tint = (1.0, 1.0, 1.0)
-            cs = min(max(cmb / 200.0, 0.35), 1.125)
-            if age < 200:
-                p = age / 200.0
-                sy = 1.0 + (20.0 * cs - 1.0) * (1.0 - (1.0 - p) ** 5)
-            else:
-                p = (age - 200.0) / 600.0
-                sy = (20.0 * cs) + (1.0 - 20.0 * cs) * (p * p)
-            beam_h = base * sy
-            beam_w = max(4.0, base * 0.7)    # thin glow streak (lazer is glow-only)
             gtint = tuple(c + (1.0 - c) * 0.2 for c in tint)
             gsize = self.fruit_screen * 1.3
             out.append(Sprite(sx, self.plane_y, gsize, gsize, texture_key="catch_glow",
                               color=(gtint[0], gtint[1], gtint[2], alpha * 0.30),
-                              additive=True))
-            out.append(Sprite(sx, self.plane_y - beam_h / 2.0, beam_w, beam_h,
-                              texture_key="catch_beam",
-                              color=(tint[0], tint[1], tint[2], alpha * 0.35),
                               additive=True))
         return out
