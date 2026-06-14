@@ -63,8 +63,6 @@ class DanserHud:
     def overlay(self, rgb: np.ndarray, scene) -> np.ndarray:
         img = Image.fromarray(rgb, "RGB")
         pad = int(self.w * 0.012)
-        # the Argon health bar hugs the very top; keep the score stack below it
-        top_y = int(0.014 * self.h + 40.0 * (self.h / 1080.0) + 0.012 * self.h)
         cfg = self.cfg
         def _on(n):
             return cfg is None or getattr(cfg, n, True)
@@ -73,8 +71,8 @@ class DanserHud:
         # layout (y / mods_y / pp rows) stays consistent; only the paste is gated.
         score_img = self._number(f"{scene.score}", self.score_glyphs, overlap=1)
         if _on("show_score"):
-            self._paste(img, score_img, self.w - pad - score_img.width, top_y)
-        y = top_y + score_img.height + int(self.h * 0.008)
+            self._paste(img, score_img, self.w - pad - score_img.width, pad)
+        y = pad + score_img.height + int(self.h * 0.008)
 
         # accuracy (under score, right-aligned) + grade to its left
         acc_img = self._number(f"{scene.accuracy * 100:.2f}%", self.acc_glyphs, overlap=1)

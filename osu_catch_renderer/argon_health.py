@@ -27,7 +27,7 @@ GLOW_PATH_RADIUS = 40.0
 MAIN_GLOW_PORTION = 0.6
 BAR_HEIGHT = 20.0
 PADDING = MAIN_PATH_RADIUS * 2.0            # content height = BAR_HEIGHT + PADDING
-WIDTH_FRAC = 0.98
+DEFAULT_WIDTH = 300.0          # lazer ArgonSkin default-skin health bar Width
 # curve (the right-end hook) — sh_ArgonBarPathUtils.h
 CURVE_START_OFFSET = 70.0
 CURVE_END_OFFSET = 40.0
@@ -47,19 +47,20 @@ def _damp(cur: float, target: float, half_life_ms: float, dt_ms: float) -> float
     return target + (cur - target) * (0.5 ** (dt_ms / half_life_ms))
 
 
-def _build_centerline(sx: float, sy: float, R: float, s: float):
+def _build_centerline(sx: float, sy: float, R: float, k: float):
     """Replicate getBarTexturePosition's centre-line as a dense polyline.
 
     Returns (cx, cy, ct) sample arrays with ct the cumulative arc-length
     fraction in [0,1]. The 10px corner fillets are omitted (negligible at bar
     scale); the dominant horizontal->slash->horizontal hook is exact.
+    `k` scales lazer's absolute curve offsets to our bar size.
     """
     p1 = np.array([min(R, sx * 0.5), min(R, sy * 0.5)])
     p4 = np.array([max(sx - R, sx * 0.5), max(sy - R, sy * 0.5)])
     if abs(p4[1] - p1[1]) < 1e-6:
         pts = [p1, np.array([p4[0], p1[1]])]
     else:
-        cso, ceo = CURVE_START_OFFSET * s, CURVE_END_OFFSET * s
+        cso, ceo = CURVE_START_OFFSET * k, CURVE_END_OFFSET * k
         top_w = max(sx - R - cso, p1[0]) - p1[0]
         bot_w = p4[0] - max(sx - R - ceo, p1[0])
         if top_w < bot_w:
@@ -92,12 +93,12 @@ def _build_centerline(sx: float, sy: float, R: float, s: float):
 class _Layer:
     """One distance-field layer (its own size/origin/radius)."""
 
-    def __init__(self, ox, oy, sx, sy, R, s):
+    def __init__(self, ox, oy, sx, sy, R, k):
         self.ox, self.oy = int(round(ox)), int(round(oy))
         self.sx, self.sy, self.R = sx, sy, R
         self.w_px = int(np.ceil(sx))
         self.h_px = int(np.ceil(sy))
-        cx, cy, ct = _build_centerline(sx, sy, R, s)
+        cx, cy, ct = _build_centerline(sx, sy, R, k)
         self.cx, self.cy, self.ct = cx, cy, ct
         # pixel grid (local layer coords, pixel centres)
         xs = np.arange(self.w_px) + 0.5
@@ -186,21 +187,27 @@ def _colour_bg(d, R):
 class ArgonHealth:
     """Stateful per-render Argon health bar. Call update_draw() each frame."""
 
-    def __init__(self, w: int, h: int, top_frac: float = 0.014):
+    def __init__(self, w: int, h: int, width_frac: float = 0.235,
+                 left_frac: float = 0.012, top_frac: float = 0.012):
         self.w, self.h = w, h
-        s = h / 1080.0
-        self.s = s
-        box_w = WIDTH_FRAC * w
-        box_h = (BAR_HEIGHT + PADDING) * s
-        box_ox = (w - box_w) / 2.0
+        # lazer's default Argon skin pins the health bar to a fixed Width=300
+        # (NOT 0.98 relative) — a short top-left bar in the score wedge. We match
+        # the reference screenshots' ~0.235*W and scale every lazer absolute
+        # constant by k = box_w/300 so the SHAPE (incl. the right-end hook) is
+        # an exact scaled copy of lazer's 300px bar.
+        box_w = width_frac * w
+        k = box_w / DEFAULT_WIDTH
+        self.k = k
+        box_h = (BAR_HEIGHT + PADDING) * k
+        box_ox = left_frac * w
         box_oy = top_frac * h
-        R = MAIN_PATH_RADIUS * s
-        gR = GLOW_PATH_RADIUS * s
-        pad_expand = (GLOW_PATH_RADIUS - MAIN_PATH_RADIUS) * s          # glow container grows out
-        self.bg = _Layer(box_ox, box_oy, box_w, box_h, R, s)
-        self.main = _Layer(box_ox, box_oy, box_w, box_h, R, s)
+        R = MAIN_PATH_RADIUS * k
+        gR = GLOW_PATH_RADIUS * k
+        pad_expand = (GLOW_PATH_RADIUS - MAIN_PATH_RADIUS) * k          # glow container grows out
+        self.bg = _Layer(box_ox, box_oy, box_w, box_h, R, k)
+        self.main = _Layer(box_ox, box_oy, box_w, box_h, R, k)
         self.glow = _Layer(box_ox - pad_expand, box_oy - pad_expand,
-                           box_w + 2 * pad_expand, box_h + 2 * pad_expand, gR, s)
+                           box_w + 2 * pad_expand, box_h + 2 * pad_expand, gR, k)
         # animation state
         self._hp = None
         self._glow = None
@@ -289,7 +296,10 @@ class ArgonHealth:
                 k = 1.0 - self._flash_t / 300.0
                 glow_rgb = tuple(GLOW_RGB[i] + (1.0 - GLOW_RGB[i]) * k for i in range(3))
             glow_a = GLOW_A
-        if hi > lo + 1e-4:
+        if hv > 1e-4:
+            # always draw the glow (zero-length -> a bright tip cap at the
+            # leading health edge, as in lazer); a miss stretches it into the
+            # red drain trail.
             gd = self.glow.distance(lo, hi)
             grgb, ga = _colour_bar(gd, self.glow.R, GLOW_GLOW_PORTION,
                                    bar_rgb, 1.0, glow_rgb, glow_a)
