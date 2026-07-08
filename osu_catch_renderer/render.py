@@ -275,6 +275,10 @@ def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = 
     # outro past the song's end). Bound the pad to the exact video duration —
     # an UNBOUNDED apad races the (slow) raw-video pipe and overflows the
     # filtergraph buffer (ffmpeg reports it as ENOSPC and dies).
+    # Loudness-normalise to a consistent EBU R128 baseline (single-pass) so
+    # hot beatmap masters stop blasting: I=-14 LUFS, true-peak -1.5 dBTP.
+    # The volume trim below is applied AFTER, relative to this baseline.
+    parts.append("loudnorm=I=-14:TP=-1.5:LRA=11")
     vol = (general_volume / 100.0) * (music_volume / 100.0)
     if abs(vol - 1.0) > 1e-3:
         parts.append(f"volume={max(0.0, vol):.3f}")
