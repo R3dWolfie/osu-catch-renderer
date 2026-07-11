@@ -1,49 +1,58 @@
-"""Procedural osu!lazer-style base UI elements (no skin sprites).
+"""Procedural osu!lazer **Argon** catcher (no skin sprites).
 
-Red's parity target is osu!lazer's built-in look as the BASE; custom skins
-layer on later. Colours/geometry are measured directly from the lazer
-reference render (Night05 @ EZ): the catcher plate is a violet->magenta
-vertical-gradient trapezoid (top wider than bottom) with a white outline.
+Red's parity target is osu!lazer's built-in Argon look as the BASE. The Argon
+catcher (ppy/osu `Skinning/Argon/ArgonCatcher.cs`, MIT) is minimal and WHITE:
+
+  - a white rounded **bar** spanning `ALLOWED_CATCH_RANGE` (0.8) of the catcher
+    width, height 10 (playfield units) — the catch zone;
+  - a white rounded **bumper** at each end of the catch range, width (1-0.8)/2
+    = 0.1 of the catcher width, height 4;
+  - a faint (alpha 0.25) **long line**, height 1.8, extending from each end out
+    toward the screen edge.
+
+All pieces are Color4.White — no gradient, glow, or dish. The catcher is drawn
+directly from primitive quads in scene.py; this module only bakes the shared
+rounded-capsule texture and returns the pixel geometry (footprint unchanged:
+full width = the renderer's catcher_w, placed with its top on the catch plane).
 """
 from __future__ import annotations
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-# Measured from the reference: top fill (171,85,254) -> bottom fill (246,8,254),
-# trapezoid bottom width / top width = 235/284 ~= 0.827, height/topwidth = 48/284.
-_TOP_RGB = (171, 85, 254)
-_BOT_RGB = (246, 8, 254)
-CATCHER_BOTTOM_RATIO = 235 / 284
-CATCHER_ASPECT = 48 / 284          # height / top-width
+# Catcher.ALLOWED_CATCH_RANGE — the catchable fraction of the catcher width.
+ALLOWED_CATCH_RANGE = 0.8
 
 
-def catcher_rgba(top_w: int = 568) -> np.ndarray:
-    """RGBA texture of the lazer catcher plate, plate filling the top edge."""
-    plate_h = int(round(top_w * CATCHER_ASPECT))
-    pad = max(4, top_w // 90)                      # room for the white outline
-    W, H = top_w + pad * 2, plate_h + pad * 2
-    bot_w = top_w * CATCHER_BOTTOM_RATIO
-    cx = W / 2.0
-    y0, y1 = pad, pad + plate_h
-    top = [(cx - top_w / 2, y0), (cx + top_w / 2, y0)]
-    bot = [(cx + bot_w / 2, y1), (cx - bot_w / 2, y1)]
-    poly = [top[0], top[1], bot[0], bot[1]]
+def argon_bar_cap_rgba(w: int = 512, h: int = 64) -> np.ndarray:
+    """A white horizontal capsule (rounded-rect, corner radius = h/2), AA'd.
+    Stretched to the bar/bumper sizes at draw time; the end caps stay rounded
+    (a thin near-horizontal bar's caps read as rounded regardless of stretch)."""
+    SS = 4
+    img = Image.new("L", (w * SS, h * SS), 0)
+    ImageDraw.Draw(img).rounded_rectangle(
+        [0, 0, w * SS - 1, h * SS - 1], radius=h * SS / 2.0, fill=255)
+    a = np.asarray(img.resize((w, h), Image.LANCZOS), np.float32) / 255.0
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., :3] = 255
+    out[..., 3] = (a * 255).astype(np.uint8)
+    return out
 
-    # vertical gradient, masked to the trapezoid
-    grad = np.zeros((H, W, 4), np.uint8)
-    for y in range(H):
-        f = min(1.0, max(0.0, (y - y0) / max(1, plate_h)))
-        grad[y, :, 0] = int(_TOP_RGB[0] + (_BOT_RGB[0] - _TOP_RGB[0]) * f)
-        grad[y, :, 1] = int(_TOP_RGB[1] + (_BOT_RGB[1] - _TOP_RGB[1]) * f)
-        grad[y, :, 2] = int(_TOP_RGB[2] + (_BOT_RGB[2] - _TOP_RGB[2]) * f)
-    grad[:, :, 3] = 255                              # opaque fill (mask clips it)
-    fill = Image.fromarray(grad)
-    mask = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(mask).polygon(poly, fill=255)
-    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    out.paste(fill, (0, 0), mask)
-    # white rounded outline
-    ow = max(2, top_w // 110)
-    ImageDraw.Draw(out).polygon(poly, outline=(255, 255, 255, 255), width=ow)
-    return np.asarray(out)
+
+def argon_catcher_metrics(catcher_w: float, unit_px: float,
+                          plane_y: float) -> dict:
+    """Pixel geometry of the Argon catcher pieces. Footprint is unchanged: the
+    full catcher spans `catcher_w` with the top of the bar on `plane_y` (where
+    the old plate's top lip sat). Heights come from Argon's absolute px (10 / 4
+    / 1.8) scaled by the playfield unit; widths are the Argon fractions of the
+    catcher width (bar 0.8, bumper 0.1 each -> together exactly 1.0)."""
+    bar_h = 10.0 * unit_px
+    bump_h = 4.0 * unit_px
+    line_h = max(1.0, 1.8 * unit_px)
+    bar_w = ALLOWED_CATCH_RANGE * catcher_w
+    bump_w = (1.0 - ALLOWED_CATCH_RANGE) / 2.0 * catcher_w
+    cy = plane_y + bar_h * 0.5           # bar top on plane_y (old top-lip line)
+    return {
+        "full_w": catcher_w, "bar_w": bar_w, "bar_h": bar_h,
+        "bump_w": bump_w, "bump_h": bump_h, "line_h": line_h, "cy": cy,
+    }

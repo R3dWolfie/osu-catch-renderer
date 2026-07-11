@@ -41,6 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--banana-rainbow", action=BA, default=True)
     ap.add_argument("--pp-counter", action=BA, default=True)
     ap.add_argument("--hit-counter", action=BA, default=True)
+    ap.add_argument("--key-counter", action=BA, default=True,
+                    help="Argon key counter bottom-right (B1/B2/B3 = "
+                         "move-left / move-right / dash press counts)")
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--general-volume", type=int, default=100)
@@ -71,6 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--leaderboard-json", type=Path, default=None,
                     help="path to the bot-written osu! global scores JSON "
                          "(only read when --leaderboard-source osu)")
+    ap.add_argument("--featured-avatar-png", type=Path, default=None,
+                    help="PNG of the FEATURED player's REAL osu! avatar for "
+                         "the results CENTRE card (service passes the player's "
+                         "osu! pfp). Absent -> the procedural username chip. "
+                         "The old render-DB Discord lookup is gone, so the "
+                         "card can never show the owner's pfp.")
     args = ap.parse_args(argv)
 
     cfg = RenderConfig(
@@ -90,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         banana_rainbow=args.banana_rainbow,
         show_pp_counter=args.pp_counter,
         show_hit_counter=args.hit_counter,
+        show_key_counter=args.key_counter,
         watermark=args.watermark,
         music_volume=args.music_volume,
         general_volume=args.general_volume,
@@ -113,6 +123,17 @@ def main(argv: list[str] | None = None) -> int:
 
     def progress(pct: int) -> None:
         print(f"\rrendering… {pct:3d}%", end="", file=sys.stderr, flush=True)
+
+    # Hand the FEATURED player's osu! avatar PNG to the results screen (the
+    # centre card). Set once here, before rendering; a missing/unreadable file
+    # leaves the featured card on the procedural chip. Replaces the old
+    # render-DB Discord lookup (which could show the SITE OWNER's pfp).
+    if args.featured_avatar_png is not None:
+        try:
+            from . import lazer_results as _lr
+            _lr.set_featured_avatar_png(args.featured_avatar_png)
+        except Exception:  # noqa: BLE001 -- avatar wiring never breaks a render
+            pass
 
     out = render_catch(args.osr, args.beatmap_dir, args.output, cfg,
                        progress_callback=progress)

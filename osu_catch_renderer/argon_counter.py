@@ -1,12 +1,15 @@
 """osu!lazer **Argon** counter font (score / combo / accuracy / pp).
 
-Draws the squared "argon-counter" numerals **procedurally** as rounded
-7-segment bars — the same licence-clean technique the osu!STANDARD renderer
-uses (osu_std_renderer/render/textures.py: `bake_argon_segment`,
-`bake_wireframe_cell`, `bake_wireframe_dot`, `_ARGON_SEG_MAP`). Nothing is
-loaded from ppy/osu-resources any more (the old CC-BY-NC
-`argon-counter-*.png` sprites are gone), so there is zero asset-licence
-concern and the counter matches STD's counter by construction.
+Prefers the REAL osu!lazer `argon-counter-*.png` sprites when they are present
+in a live ``argon_assets/`` dir next to this module (copied from the
+quarantined ``argon_assets.RIPPED_CCBYNC.bak/``) — so the HUD digits are
+pixel-exact to lazer. When that dir is absent it falls back to drawing the
+squared numerals **procedurally** as rounded 7-segment bars — the same
+licence-clean technique the osu!STANDARD renderer uses
+(osu_std_renderer/render/textures.py: `bake_argon_segment`,
+`bake_wireframe_cell`, `bake_wireframe_dot`, `_ARGON_SEG_MAP`), so a stripped
+checkout still renders. Either path yields the SAME fixed 132x240 cell, so the
+HUD / font layout is byte-for-byte unchanged.
 
 Mirrors `ArgonCounterTextComponent`:
   * fixed-width 132x240 cells (aspect 0.55), displayed at the requested
@@ -21,6 +24,7 @@ Mirrors `ArgonCounterTextComponent`:
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 from PIL import Image
@@ -169,6 +173,112 @@ def bake_wireframe_dot(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
 
 
 # ---------------------------------------------------------------------------
+# Real Argon-counter sprites (osu!lazer's own argon-counter-*.png) — when a
+# live ``argon_assets/`` dir ships them they REPLACE the procedural bakes so
+# the digits are pixel-exact to lazer; otherwise the procedural bakes above are
+# used unchanged. Mirrors the STD renderer's textures.py (_argon_counter_cell /
+# argon_seg_advance): lazer's argon-counter is a FIXED-WIDTH *square* font —
+# every digit ships on a 240x240 canvas, '.' on a narrow 52x240 canvas. We
+# normalise every glyph onto ONE common square cell (ARGON_SEG_H x ARGON_SEG_H)
+# by scaling to the cell HEIGHT and centring horizontally, RGB forced white
+# (tintable), alpha preserved. So digits fill the square (aspect ~1.0, the
+# approved wider look that matches STD), while the narrow '.' dot stays small
+# and centred rather than stretching. The digit ADVANCE derives from the real
+# glyph's aspect (argon_digit_advance() = aspect of '8' ≈ 1.0); the procedural
+# fallback keeps its 132x240 (0.55) aspect, so a stripped checkout is unchanged.
+# ---------------------------------------------------------------------------
+
+_ASSET_DIR = os.path.join(os.path.dirname(__file__), "argon_assets")
+
+# glyph char -> the argon-counter-<stem>.png stem
+_SPRITE_STEM = {**{str(d): str(d) for d in range(10)},
+                ".": "dot", "%": "percentage", "x": "x"}
+
+
+def _real_sprite_path(stem: str) -> str:
+    return os.path.join(_ASSET_DIR, f"argon-counter-{stem}.png")
+
+
+def _load_real_sprite(stem: str):
+    """Load a real argon-counter sprite as RGBA, or None if absent/unreadable
+    (→ the caller falls back to the procedural bake)."""
+    p = _real_sprite_path(stem)
+    if not os.path.isfile(p):
+        return None
+    try:
+        return Image.open(p).convert("RGBA")
+    except Exception:  # noqa: BLE001 — a bad asset just falls back to procedural
+        return None
+
+
+_ARGON_COUNTER_CELL = ARGON_SEG_H          # 240 — common SQUARE cell (glyph height)
+
+
+def _sprite_to_cell(img: Image.Image) -> np.ndarray:
+    """Normalise a real argon-counter sprite onto the common SQUARE cell
+    (ARGON_SEG_H x ARGON_SEG_H) as a WHITE (tintable) RGBA array — a 1:1 mirror
+    of the STD renderer's _argon_counter_cell so catch shares STD's true
+    fixed-width square metric (the approved wider Argon look). Scaled by HEIGHT
+    to the cell, centred horizontally, RGB forced white, only the alpha kept:
+    digits fill the square (aspect ~1.0), the narrow '.' dot stays small and
+    centred rather than stretching to fill."""
+    cell = _ARGON_COUNTER_CELL
+    if img.height != cell:
+        nw = max(1, round(img.width * cell / img.height))
+        img = img.resize((nw, cell), Image.LANCZOS)
+    if img.width > cell:                         # defensive (real art is <= cell)
+        nh = max(1, round(img.height * cell / img.width))
+        img = img.resize((cell, nh), Image.LANCZOS)
+    src = np.asarray(img)
+    h, w = src.shape[:2]
+    rgba = np.zeros((cell, cell, 4), dtype=np.uint8)
+    y0, x0 = (cell - h) // 2, (cell - w) // 2
+    rgba[y0:y0 + h, x0:x0 + w, 3] = src[..., 3]
+    rgba[..., 0:3] = 255                         # white → tint does the colour
+    return rgba
+
+
+def argon_glyph_rgba(char: str) -> np.ndarray:
+    """A lit Argon-counter glyph as WHITE tintable RGBA: the real lazer sprite
+    normalised onto the square cell when argon_assets/ ships it (aspect ~1.0),
+    else the procedural 132x240 bake (aspect 0.55)."""
+    stem = _SPRITE_STEM.get(char)
+    if stem is not None:
+        img = _load_real_sprite(stem)
+        if img is not None:
+            return _sprite_to_cell(img)
+    return bake_argon_segment(char)
+
+
+def argon_wireframe_rgba() -> np.ndarray:
+    """The all-segments '8' wireframe backing: real 'wireframes' sprite, else
+    the procedural bake."""
+    img = _load_real_sprite("wireframes")
+    if img is not None:
+        return _sprite_to_cell(img)
+    return bake_wireframe_cell()
+
+
+def argon_wireframe_dot_rgba() -> np.ndarray:
+    """The '.' wireframe backing. lazer ships no dedicated dot-wireframe, so the
+    real dot sprite doubles as its own dim backing (a lit dot registers on top
+    of it by construction); the procedural dot otherwise."""
+    img = _load_real_sprite("dot")
+    if img is not None:
+        return _sprite_to_cell(img)
+    return bake_wireframe_dot()
+
+
+def argon_digit_advance() -> float:
+    """The fixed-width digit advance = the '8' glyph aspect (width/height):
+    ~1.0 (real square sprites, matching STD's approved wider counter) or 0.55
+    (procedural fallback). Mirrors STD's argon_seg_advance = aspect['8'] so the
+    counter run derives its cell width from the actual glyph, undistorted."""
+    g = argon_glyph_rgba("8")
+    return g.shape[1] / g.shape[0]
+
+
+# ---------------------------------------------------------------------------
 # ArgonFont — same public interface as before (measure / render), but the
 # glyphs are baked procedurally instead of loaded from PNGs. All cells are a
 # fixed 132x240 (STD's monospace 7-segment cell), advanced edge-to-edge to
@@ -192,19 +302,22 @@ def _to_image(rgba: np.ndarray) -> Image.Image:
 
 
 class ArgonFont:
-    """Procedural Argon-counter font. ``asset_dir`` is accepted for call-site
-    compatibility but IGNORED — no PNG assets are read."""
+    """Argon-counter font. Loads the REAL argon-counter-*.png sprites from the
+    live ``argon_assets/`` dir when present (tintable, pixel-exact to lazer),
+    else bakes the glyphs procedurally as a fallback. ``asset_dir`` is accepted
+    for call-site compatibility but IGNORED (the dir is resolved next to this
+    module)."""
 
     def __init__(self, asset_dir=None):
         self.glyphs: dict[str, Image.Image] = {}
         for ch in "0123456789":
-            self.glyphs[ch] = _to_image(bake_argon_segment(ch))
-        self.glyphs["dot"] = _to_image(bake_argon_segment("."))
-        self.glyphs["percentage"] = _to_image(bake_argon_segment("%"))
-        self.glyphs["x"] = _to_image(bake_argon_segment("x"))
-        self.glyphs["wireframes"] = _to_image(bake_wireframe_cell())
+            self.glyphs[ch] = _to_image(argon_glyph_rgba(ch))
+        self.glyphs["dot"] = _to_image(argon_glyph_rgba("."))
+        self.glyphs["percentage"] = _to_image(argon_glyph_rgba("%"))
+        self.glyphs["x"] = _to_image(argon_glyph_rgba("x"))
+        self.glyphs["wireframes"] = _to_image(argon_wireframe_rgba())
         self._wf = self.glyphs["wireframes"]
-        self._wf_dot = _to_image(bake_wireframe_dot())
+        self._wf_dot = _to_image(argon_wireframe_dot_rgba())
 
     def _glyph(self, ch: str):
         return self.glyphs.get(_lookup(ch))

@@ -11,6 +11,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 
+from .assets import ARGON_CANVAS, ARGON_VARIANTS
 from .models import (
     CatchBeatmap,
     CatchFrame,
@@ -63,6 +64,11 @@ class CatchSim:
                       if end_ms is None or o.time_ms <= end_ms]
         if not self._objs:   # death before any object — don't blank the sim
             self._objs = list(beatmap.objects)
+        # lazer picks a fruit's VisualRepresentation from IndexInBeatmap % 4
+        # (Fruit.GetVisualRepresentation). We approximate IndexInBeatmap with a
+        # running index over the flattened palpable objects in beatmap order, so
+        # successive fruits cycle Pear/Grape/Pineapple/Raspberry like the game.
+        self._obj_index = {id(o): i for i, o in enumerate(beatmap.objects)}
         self.score_scale = 1.0
         self.acc_offset = 0.0   # shifts sim accuracy to the replay's real final
         self.final_counts = (0, 0, 0, 0, 0)  # (300, 100, 50, katu, miss)
@@ -322,11 +328,13 @@ class CatchSim:
 
         # catcher (+ dash trail + caught-fruit pile riding on the plate)
         cx, dashing = catcher_x_at(self.frames, t_ms)
+        s.catcher_x = float(cx)          # HUD key counter (L/R from x delta)
+        s.dashing = bool(dashing)        # HUD key counter (dash key state)
         scx = self._sx(cx)
         hyper = self.cfg.show_hyperdash and any(a <= t_ms <= b for a, b in self._hyper_windows)
         if self.cfg.catcher_dash_trail and (dashing or hyper):
             s.sprites.extend(self._dash_trail(t_ms, hyper))
-        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper))
+        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper, t_ms))
         s.sprites.extend(self._plate_stack(scx, t_ms))
         s.sprites.extend(self._catch_explosions(t_ms))
 
@@ -423,10 +431,46 @@ class CatchSim:
         a = (t_rem - 0.44 * p) / (0.16 * p)
         return 0.0 if a < 0.0 else (1.0 if a > 1.0 else a)
 
+    # lazer's default combo colours (SkinConfiguration.DefaultComboColours) —
+    # the no-skin fallback palette, so skinless renders show lazer's orange /
+    # green / blue / red fruits instead of a neon hue wheel.
+    _LAZER_COMBO = ((1.0, 0.753, 0.0), (0.0, 0.792, 0.0),
+                    (0.070, 0.486, 1.0), (0.949, 0.094, 0.224))
+
+    def _combo_tint(self, combo_index: int) -> tuple[float, float, float]:
+        if self.skin is not None:
+            return self.skin.combo_color(combo_index)
+        return self._LAZER_COMBO[combo_index % len(self._LAZER_COMBO)]
+
     def _object_sprites(self, obj, x, y, t_ms) -> list[Sprite]:
-        # lazer Argon look: procedural organic ring + white centre dot + glow
-        # (ArgonFruitPiece), NOT skin fruit icons.
+        # A custom uploaded skin's fruit sprites WIN when it ships them;
+        # _skinned_object falls back to _argon_object per object-kind for any
+        # element the skin lacks. The skinless base is osu!lazer's ARGON look:
+        # glowing, combo-coloured wavy rings (stacked additive CircularBlobs)
+        # over a white centre pip — NOT pulp clusters or flat discs; hyper
+        # objects add Argon's red blob. (Argon is the DEFAULT only.)
+        if self.skin is not None:
+            return self._skinned_object(obj, x, y, t_ms)
         return self._argon_object(obj, x, y, t_ms)
+
+    def _argon_variant(self, obj) -> int:
+        """Pick one of the baked seed variants so successive objects vary like
+        lazer's per-object random blob seeds (deterministic per object)."""
+        return self._obj_index.get(id(obj), 0) % ARGON_VARIANTS
+
+    def _banana_flare_alpha(self, obj_time: int, t_ms: int) -> float:
+        """ArgonBananaPiece lens-flare fade: fully visible for the first 30% of
+        the approach, then fades to 0 by 80% (OutQuint), invisible after."""
+        p = self.preempt
+        if p <= 0:
+            return 0.0
+        frac = (t_ms - (obj_time - p)) / p     # 0 at spawn .. 1 at the catch line
+        if frac <= 0.3:
+            return 1.0
+        if frac >= 0.8:
+            return 0.0
+        u = (frac - 0.3) / 0.5
+        return (1.0 - u) ** 5                   # ValueAt(1->0, OutQuint) == (1-u)^5
 
     def _argon_object(self, obj, x, y, t_ms) -> list[Sprite]:
         fs = self.fruit_screen
@@ -436,45 +480,71 @@ class CatchSim:
             size = fs * 0.58
         else:
             size = fs * 1.05
-        hyper = (obj.kind is ObjType.FRUIT and obj.hyperdash
-                 and self.cfg.show_hyperdash)
+        d = size * ARGON_CANVAS        # blob canvas spans ARGON_CANVAS object-boxes
+        v = self._argon_variant(obj)
+        out: list[Sprite] = []
+
+        # droplets / tiny droplets (ArgonDropletPiece): white pip + a smaller
+        # glowing blob (additive, combo-tinted); hyper adds the red blob.
+        if obj.kind in (ObjType.DROPLET, ObjType.TINY_DROPLET):
+            tint = self._combo_tint(obj.combo_index)
+            out.append(Sprite(x, y, d, d, texture_key="argon_pip", color=(1, 1, 1, 1)))
+            out.append(Sprite(x, y, d, d, texture_key=f"argon_droplet_{v}",
+                              color=(*tint, 1.0), additive=True))
+            if obj.hyperdash and self.cfg.show_hyperdash:
+                out.append(Sprite(x, y, d, d, texture_key=f"argon_drophyper_{v}",
+                                  color=(1.0, 0.0, 0.0, 1.0), additive=True))
+            return out
+
+        # bananas (ArgonBananaPiece : ArgonFruitPiece): the fruit blob stack in
+        # the banana colour + white pip, plus a horizontal lens-flare overlay
+        # that fades out over the approach. Gentle deterministic tumble.
         if obj.kind is ObjType.BANANA:
             tint = (_hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
-                    if self.cfg.banana_rainbow else (1.0, 0.85, 0.15))
-        elif self.skin is not None:
-            tint = self.skin.combo_color(obj.combo_index)  # hyper keeps its colour
-        else:
-            tint = _hue((obj.combo_index * 0.13) % 1.0)
-        # Per-fruit organic variation: unique base rotation + gentle spin so the
-        # wavy ring looks different on every fruit (lazer seeds CircularBlob).
-        seed = (int(obj.time_ms) * 2654435761) ^ (int(obj.x * 53) & 0xFFFF)
-        base_ang = (seed % 628) / 100.0
-        spin_dir = 1.0 if (seed >> 4) & 1 else -1.0
-        rot = base_ang + (t_ms - obj.time_ms + self.preempt) * 0.0006 * spin_dir
-        out = [
-            Sprite(x, y, size * 1.5, size * 1.5, texture_key="catch_glow",
-                   color=(tint[0], tint[1], tint[2], 0.45), additive=True),
-            Sprite(x, y, size, size, texture_key="argon_fruit_ring",
-                   color=(tint[0], tint[1], tint[2], 0.95), additive=True,
-                   rotation=rot),
-        ]
+                    if self.cfg.banana_rainbow else (1.0, 0.83, 0.15))
+            seed = (int(obj.time_ms) * 2654435761) ^ (int(obj.x * 53) & 0xFFFF)
+            spin_dir = 1.0 if (seed >> 4) & 1 else -1.0
+            rot = ((seed % 628) / 100.0
+                   + (t_ms - obj.time_ms + self.preempt) * 0.0008 * spin_dir)
+            out.append(Sprite(x, y, d, d, texture_key="argon_pip",
+                              color=(1, 1, 1, 1), rotation=rot))
+            out.append(Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
+                              color=(*tint, 1.0), rotation=rot, additive=True))
+            fa = self._banana_flare_alpha(obj.time_ms, t_ms)
+            if fa > 0.0:
+                out.append(Sprite(x, y, size * 2.2, size * 1.1,
+                                  texture_key="argon_banana_flare",
+                                  color=(1, 1, 1, fa), additive=True))
+            return out
+
+        # fruit (ArgonFruitPiece): white pip UNDER a stack of 3 additive,
+        # combo-tinted wavy blobs; hyper adds Argon's red blob (shares seed).
+        # lazer's small deterministic ±20° tilt (DrawableFruit ScalingContainer).
+        tint = self._combo_tint(obj.combo_index)   # hyper keeps its combo colour
+        rot = ((int(obj.time_ms) % 1000) / 1000.0 - 0.5) * 0.698   # ±20°
+        hyper = obj.hyperdash and self.cfg.show_hyperdash
+        out.append(Sprite(x, y, d, d, texture_key="argon_pip",
+                          color=(1, 1, 1, 1), rotation=rot))
+        out.append(Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
+                          color=(*tint, 1.0), rotation=rot, additive=True))
         if hyper:
-            # lazer HyperBorderPiece: combo-coloured fruit + a red ring around it
-            out.append(Sprite(x, y, size * 1.22, size * 1.22,
-                              texture_key="argon_fruit_ring",
-                              color=(1.0, 0.30, 0.30, 0.9), additive=True,
-                              rotation=-rot * 0.6))
-        out.append(Sprite(x, y, size * 0.20, size * 0.20,
-                          texture_key="argon_fruit_dot", color=(1, 1, 1, 1)))
+            out.append(Sprite(x, y, d, d, texture_key=f"argon_hyper_{v}",
+                              color=(1.0, 0.0, 0.0, 1.0), rotation=rot, additive=True))
         return out
 
     def _skinned_object(self, obj, x, y, t_ms) -> list[Sprite]:
+        # Per-element skin honoring: use the skin's sprite for this object kind
+        # when it ships one, else fall back to the Argon look for that kind.
         sk = self.skin
         if obj.kind in (ObjType.DROPLET, ObjType.TINY_DROPLET):
+            if not sk.has("fruit-drop"):
+                return self._argon_object(obj, x, y, t_ms)
             # lazer: large droplet (slider tick) ~ half a fruit, tiny ~ quarter
             size = self.fruit_screen * (0.55 if obj.kind is ObjType.DROPLET else 0.30)
             return self._base_overlay("fruit-drop", x, y, size, sk.combo_color(obj.combo_index))
         if obj.kind is ObjType.BANANA:
+            if not sk.has("fruit-bananas"):
+                return self._argon_object(obj, x, y, t_ms)
             size = self.fruit_screen * 1.05
             if self.cfg.banana_rainbow:
                 tint = _hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
@@ -482,6 +552,8 @@ class CatchSim:
                 tint = (1.0, 0.85, 0.15)
             return self._base_overlay("fruit-bananas", x, y, size, tint)
         # FRUIT
+        if not sk.has(sk.fruit_key(obj.combo_index)):
+            return self._argon_object(obj, x, y, t_ms)
         hyper = obj.hyperdash and self.cfg.show_hyperdash
         size = self.fruit_screen * (1.32 if hyper else 1.05)
         tint = (1.0, 0.35, 0.35) if hyper else sk.combo_color(obj.combo_index)
@@ -502,15 +574,27 @@ class CatchSim:
     def _dash_trail(self, t_ms, hyper) -> list[Sprite]:
         """Faded catcher afterimages at recent positions while dashing."""
         out: list[Sprite] = []
-        w = self.catcher_w
-        h = w * (self.skin.catcher_aspect if self.skin else 0.32)
-        base = (1.0, 0.4, 0.4) if hyper else (0.8, 0.85, 1.0)
-        key = "fruit-catcher-idle" if (self.skin and self.skin.has("fruit-catcher-idle")) else "catcher"
+        if self.skin is not None and self.skin.has("fruit-catcher-idle"):
+            w = self.catcher_w
+            h = w * self.skin.catcher_aspect
+            base = (1.0, 0.4, 0.4) if hyper else (0.8, 0.85, 1.0)
+            for k, dt in enumerate((26, 52, 80)):
+                px, _ = catcher_x_at(self.frames, t_ms - dt)
+                alpha = 0.32 * (1.0 - k / 3.0)
+                out.append(Sprite(self._sx(px), self.plane_y + h * 0.46, w, h,
+                                  texture_key="fruit-catcher-idle",
+                                  color=(*base, alpha)))
+            return out
+        # Argon catcher trail: faint afterimages of the white catch bar at
+        # recent positions (red-tinted while hyperdashing).
+        from .lazer_skin import argon_catcher_metrics
+        g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
+        base = (1.0, 0.6, 0.6) if hyper else (0.8, 0.9, 1.0)
         for k, dt in enumerate((26, 52, 80)):
             px, _ = catcher_x_at(self.frames, t_ms - dt)
-            alpha = 0.32 * (1.0 - k / 3.0)
-            out.append(Sprite(self._sx(px), self.plane_y + h * 0.46, w, h,
-                              texture_key=key, color=(*base, alpha)))
+            alpha = 0.28 * (1.0 - k / 3.0)
+            out.append(Sprite(self._sx(px), g["cy"], g["bar_w"], g["bar_h"],
+                              texture_key="argon_bar_cap", color=(*base, alpha)))
         return out
 
     def _procedural_object(self, obj, x, y) -> Sprite:
@@ -523,29 +607,60 @@ class CatchSim:
         size = self.fruit_screen * (1.3 if obj.hyperdash else 1.0)
         return Sprite(x, y, size, size, texture_key=FRUIT_TEX[obj.combo_index % 4])
 
-    def _catcher_sprites(self, x, dashing, hyper=False) -> list[Sprite]:
-        if hyper:
-            tint = (1.0, 0.45, 0.55, 1.0)
-        elif dashing:
-            tint = (1.0, 0.8, 0.9, 1.0)
-        else:
-            tint = (1, 1, 1, 1)
+    def _catcher_sprites(self, x, dashing, hyper=False, t_ms=None) -> list[Sprite]:
         # A custom skin's catcher takes priority — same layout (CS/mod-driven
-        # catcher_w), the skin supplies the sprite. The procedural lazer plate is
-        # only the base/fallback when the skin ships no catcher.
+        # catcher_w), the skin supplies the sprite. The procedural Argon catcher
+        # is only the base/fallback when the skin ships no catcher.
         if self.skin is not None and self.skin.has("fruit-catcher-idle"):
+            if hyper:
+                tint = (1.0, 0.45, 0.55, 1.0)
+            elif dashing:
+                tint = (1.0, 0.8, 0.9, 1.0)
+            else:
+                tint = (1, 1, 1, 1)
             w = self.catcher_w
             h = w * self.skin.catcher_aspect
             return [Sprite(x, self.plane_y + h * 0.46, w, h,
                            texture_key="fruit-catcher-idle", color=tint)]
-        from .lazer_skin import CATCHER_ASPECT
-        sprite_w = self.catcher_w * 1.02          # +pad baked into the texture
-        sprite_h = sprite_w * (CATCHER_ASPECT + 2 * (6 / 568)) / (1 + 2 * (6 / 568))
-        return [Sprite(x, self.plane_y + sprite_h * 0.44, sprite_w, sprite_h,
-                       texture_key="lazer_catcher", color=tint)]
+        # osu!lazer ArgonCatcher: a white rounded catch bar (0.8 of the catcher
+        # width) + a bumper at each end of the catch range + faint side lines
+        # out to the screen edges. Footprint/placement unchanged (full width =
+        # catcher_w, bar top on plane_y). Hyperdash turns it red + glowing.
+        from .lazer_skin import argon_catcher_metrics
+        g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
+        cy = g["cy"]
+        col = (1.0, 0.5, 0.5, 1.0) if hyper else (1.0, 1.0, 1.0, 1.0)
+        out: list[Sprite] = []
+        if hyper:
+            import math
+            pulse = 0.30 + 0.14 * abs(math.sin((t_ms or 0) * 0.012))
+            out.append(Sprite(x, cy, g["full_w"] * 1.1, g["bar_h"] * 6.0,
+                              texture_key="catch_glow",
+                              color=(1.0, 0.24, 0.24, pulse), additive=True))
+        # main catch bar
+        out.append(Sprite(x, cy, g["bar_w"], g["bar_h"],
+                          texture_key="argon_bar_cap", color=col))
+        # bumpers at the ends of the catch range (flanking the 0.8 bar)
+        bx = g["bar_w"] * 0.5 + g["bump_w"] * 0.5
+        out.append(Sprite(x - bx, cy, g["bump_w"], g["bump_h"],
+                          texture_key="argon_bar_cap", color=col))
+        out.append(Sprite(x + bx, cy, g["bump_w"], g["bump_h"],
+                          texture_key="argon_bar_cap", color=col))
+        # faint long lines out to the screen edges (alpha 0.25)
+        left_outer = x - g["full_w"] * 0.5
+        right_outer = x + g["full_w"] * 0.5
+        line_c = (1.0, 0.6, 0.6, 0.25) if hyper else (1.0, 1.0, 1.0, 0.25)
+        if left_outer > 1.0:
+            out.append(Sprite(left_outer * 0.5, cy, left_outer, g["line_h"],
+                              texture_key=None, color=line_c))
+        if right_outer < self.screen_w - 1.0:
+            rw = self.screen_w - right_outer
+            out.append(Sprite(right_outer + rw * 0.5, cy, rw, g["line_h"],
+                              texture_key=None, color=line_c))
+        return out
 
     def _plate_stack(self, scx, t_ms) -> list[Sprite]:
-        """Caught fruit piled on the plate (procedural Argon rings), fading."""
+        """Caught fruit piled on the catcher (Argon blobs + pip), fading out."""
         STACK_MS = 850
         plate_half = self.half * self.x_scale
         out: list[Sprite] = []
@@ -554,23 +669,22 @@ class CatchSim:
             alpha = 1.0 - (t_ms - ct) / STACK_MS
             ox = (((ct * 131) % 100) / 100 - 0.5) * plate_half * 1.4
             oy = -(((ct * 73) % 4)) * self.fruit_screen * 0.10
-            size = self.fruit_screen * 0.50
-            tint = ((1.0, 0.35, 0.35) if hy
-                    else (self.skin.combo_color(ci) if self.skin is not None
-                          else _hue((ci * 0.13) % 1.0)))
+            d = self.fruit_screen * 0.50 * ARGON_CANVAS
+            v = int(ct // 7) % ARGON_VARIANTS
+            tint = self._combo_tint(ci)
             py = self.plane_y + self.fruit_screen * 0.15 + oy
-            out.append(Sprite(scx + ox, py, size, size, texture_key="argon_fruit_ring",
-                              color=(tint[0], tint[1], tint[2], 0.9 * alpha), additive=True))
-            out.append(Sprite(scx + ox, py, size * 0.20, size * 0.20,
-                              texture_key="argon_fruit_dot", color=(1, 1, 1, alpha)))
+            out.append(Sprite(scx + ox, py, d, d, texture_key="argon_pip",
+                              color=(1, 1, 1, alpha)))
+            out.append(Sprite(scx + ox, py, d, d, texture_key=f"argon_fruit_{v}",
+                              color=(tint[0], tint[1], tint[2], alpha), additive=True))
         return out
 
     def _catch_explosions(self, t_ms) -> list[Sprite]:
-        """lazer catch ArgonHitExplosion: every caught FRUIT fires a coloured
-        vertical light beam up from the catch point + a soft glow, additive,
-        fading over 400ms. The beam shoots up (200ms OutQuint) then retracts
-        (600ms In); its peak height scales with the combo at the catch. Droplets
-        don't explode (matches lazer)."""
+        """osu!lazer ArgonHitExplosion: every caught FRUIT fires a tall,
+        combo-coloured vertical glow that scales up to (1.1, 20*s) over 200ms
+        (OutQuint) then retracts to (1.1, 1) over 600ms (In), plus a large faint
+        glow (radius 50, colour 20% toward white). The whole thing fades out
+        over 400ms. s = clamp(combo/200, 0.35, 1.125). Droplets don't explode."""
         cts = getattr(self, "_catch_times", None)
         if cts is None:
             cts = self._catch_times = [c[0] for c in self._catches]
@@ -584,20 +698,31 @@ class CatchSim:
             age = t_ms - ct
             if age < 0:
                 continue
-            alpha = 1.0 - age / 400.0
-            if alpha <= 0.0:
+            fade = 1.0 - age / 400.0
+            if fade <= 0.0:
                 continue
             sx = self._sx(cx)
-            if hy:
-                tint = (1.0, 0.45, 0.45)
-            elif self.skin is not None:
-                tint = self.skin.combo_color(ci)
+            tint = (1.0, 0.28, 0.28) if hy else self._combo_tint(ci)
+            # tall glow: height scale 1 -> 20*s (OutQuint 200ms) -> 1 (In 600ms)
+            s = min(max(cmb / 200.0, 0.35), 1.125)
+            if age <= 200.0:
+                u = age / 200.0
+                hf = 1.0 + (20.0 * s - 1.0) * (1.0 - (1.0 - u) ** 5)
             else:
-                tint = (1.0, 1.0, 1.0)
+                u = min(1.0, (age - 200.0) / 600.0)
+                hf = 20.0 * s + (1.0 - 20.0 * s) * (u * u)
+            beam_w = base * 1.4
+            beam_h = max(base, base * hf)
+            # anchored at the catch plane, growing upward
+            out.append(Sprite(sx, self.plane_y - beam_h * 0.5, beam_w, beam_h,
+                              texture_key="catch_beam",
+                              color=(tint[0], tint[1], tint[2], 0.55 * fade),
+                              additive=True))
+            # large faint glow, colour interpolated 20% toward white
             gtint = tuple(c + (1.0 - c) * 0.2 for c in tint)
-            gsize = self.fruit_screen * 1.3
+            gsize = base * 5.0
             out.append(Sprite(sx, self.plane_y, gsize, gsize, texture_key="catch_glow",
-                              color=(gtint[0], gtint[1], gtint[2], alpha * 0.30),
+                              color=(gtint[0], gtint[1], gtint[2], 0.26 * fade),
                               additive=True))
         return out
 

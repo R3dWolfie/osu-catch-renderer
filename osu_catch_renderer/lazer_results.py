@@ -882,18 +882,36 @@ def _compute_strains(osu_path, mods: int) -> list[float]:
         return []
 
 
-def _featured_avatar_bytes(player_name: str, beatmap_md5: str):
-    """Discord avatar PNG bytes for the CURRENT player via the render DB
-    (name → discord id → resolve_avatar_bytes, the flanks' path). None →
-    procedural chip. Never blocks or raises."""
+# The FEATURED (current) player's REAL osu! avatar PNG bytes, set by the CLI
+# (--featured-avatar-png; osu! user → avatar_url → PNG) via
+# set_featured_avatar_png() before the render loop. The featured centre card
+# uses these when present, else the procedural username chip. Replaces the old
+# render-DB Discord-id lookup, which could resolve a player's name to the SITE
+# OWNER's Discord pfp on the featured card (bug 2026-07-11). The flank cards
+# keep their own Discord avatars (lb_cards -- untouched).
+_FEATURED_AVATAR_PNG_BYTES: bytes | None = None
+
+
+def set_featured_avatar_png(path) -> None:
+    """Load the featured player's osu! avatar PNG bytes from `path` (called by
+    the CLI once, before rendering). Fail-soft: a falsy/missing/unreadable path
+    leaves the featured card on the procedural chip."""
+    global _FEATURED_AVATAR_PNG_BYTES
     try:
-        from .leaderboard import query_player_discord_id, resolve_avatar_bytes
-        did = query_player_discord_id(DB_PATH, player_name, beatmap_md5)
-        if not did:
-            return None
-        return resolve_avatar_bytes(did)
-    except Exception:  # noqa: BLE001 — avatars never break a bake
-        return None
+        from pathlib import Path as _P
+        _FEATURED_AVATAR_PNG_BYTES = _P(path).read_bytes() if path else None
+    except OSError:
+        _FEATURED_AVATAR_PNG_BYTES = None
+
+
+def _featured_avatar_bytes(player_name: str, beatmap_md5: str):
+    """PNG bytes of the FEATURED player's REAL osu! avatar (set by the CLI via
+    set_featured_avatar_png / --featured-avatar-png), or None → the procedural
+    username chip. The old render-DB Discord path was REMOVED: a player whose
+    name maps (stale/colliding) to a linked Discord account could resolve to
+    the SITE OWNER's pfp on the featured card (bug 2026-07-11). The flank cards
+    keep their own Discord avatars (lb_cards -- untouched)."""
+    return _FEATURED_AVATAR_PNG_BYTES
 
 
 def _paste(base: Image.Image, img: Image.Image, cx: float, cy: float,

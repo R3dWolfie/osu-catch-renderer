@@ -115,6 +115,7 @@ class RenderConfig:
     banana_rainbow: bool = True         # rainbow banana showers
     show_pp_counter: bool = True        # running pp counter (needs rosu-pp-py)
     show_hit_counter: bool = True       # 300/100/50/miss tallies
+    show_key_counter: bool = True       # Argon key counter (B1/B2/B3), bottom-right
     watermark: str = ""                # bottom-right branding (free renders forced to site URL)
     # audio (0..100 from preset; 100 = unchanged)
     music_volume: int = 100
@@ -168,6 +169,10 @@ class SceneState:
     time_ms: int = 0
     pp: float = 0.0
     counts: tuple = (0, 0, 0, 0, 0)   # (fruit, large-drop, tiny, miss-tiny, miss)
+    # catcher input state for the HUD's Argon key counter (set by
+    # CatchSim.build_scene from the replay frames)
+    catcher_x: float = 0.0            # catcher centre x, osu units 0..512
+    dashing: bool = False             # dash key held this frame (replay)
 
 
 # osu!catch geometry constants -------------------------------------------------

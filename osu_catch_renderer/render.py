@@ -131,25 +131,30 @@ def render_core(
     else:
         for key, rgba in build_textures().items():
             renderer.upload_texture(key, rgba)
-    # lazer-base catcher plate (procedural; used regardless of skin for now)
-    from .lazer_skin import catcher_rgba
-    renderer.upload_texture("lazer_catcher", catcher_rgba())
-    from .assets import catch_glow_rgba, catch_beam_rgba, argon_fruit_ring_rgba, argon_fruit_dot_rgba
+    # osu!lazer ARGON catch objects (glowing wavy combo rings + white pip) and
+    # the Argon catcher bar — uploaded regardless of skin: the skinless object
+    # path, the caught-fruit plate pile, and the hit explosions all use them.
+    from .assets import (build_argon_textures, catch_glow_rgba, catch_beam_rgba,
+                         bake_logo_tile)
+    for key, rgba in build_argon_textures().items():
+        renderer.upload_texture(key, rgba)
+    from .lazer_skin import argon_bar_cap_rgba
+    renderer.upload_texture("argon_bar_cap", argon_bar_cap_rgba())
     renderer.upload_texture("catch_glow", catch_glow_rgba())
     renderer.upload_texture("catch_beam", catch_beam_rgba())
-    renderer.upload_texture("argon_fruit_ring", argon_fruit_ring_rgba())
-    renderer.upload_texture("argon_fruit_dot", argon_fruit_dot_rgba())
-    from .assets import bake_logo_tile
     renderer.upload_texture("logo_tile", bake_logo_tile())
     if bg is not None:
         renderer.upload_texture("bg", _bg_cover(bg, w, h, cfg.bg_blur))
 
     total_dur_s = n_frames / cfg.fps
     proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s)
-    if skin is not None and cfg.skin_dir is not None:
+    # Argon is the DEFAULT skin: skinless renders stay all-Argon (parity with
+    # the STD renderer). DanserHud now handles skin_dir=None; plain _Hud only if
+    # DanserHud fails to build.
+    try:
         from .hud import DanserHud
         hud = DanserHud(cfg.skin_dir, cfg.resolution, meta, bm, first, last, cfg=cfg)
-    else:
+    except Exception:
         hud = _Hud(w, h, meta, bm)
 
     from .hud import draw_results

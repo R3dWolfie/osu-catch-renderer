@@ -30,7 +30,7 @@ class DanserHud:
         # in a subdir (the bundled default's `_default-source`, single-folder
         # .osk archives, etc.) — not just skins with skin.ini at the top level.
         from .skin import CatchSkin
-        self.dir = CatchSkin._resolve_root(Path(skin_dir)) if skin_dir else Path(skin_dir)
+        self.dir = CatchSkin._resolve_root(Path(skin_dir)) if skin_dir else None
         self.w, self.h = resolution
         self.meta = meta
         self.bm = beatmap
@@ -43,6 +43,12 @@ class DanserHud:
         # (stable's default ComboPrefix == ScorePrefix == "score").
         self.combo_glyphs = (self._glyphs("combo", int(H * 0.072))
                              or self._glyphs("score", int(H * 0.072)))
+        # Per-element skin honoring (STD-style): if the uploaded skin ships a
+        # number font, draw score / accuracy / combo from ITS glyphs instead of
+        # the Argon counters (like STD's per-element approach). A skinless
+        # render never loads glyphs, so it stays 100% Argon. The fruit/catcher
+        # already switch to the skin in scene.py; this covers the HUD numbers.
+        self._use_skin_hud = bool(self.score_glyphs)
         self.scorebar_bg = self._load("scorebar-bg", int(H * 0.05))
         self.scorebar_col = self._load("scorebar-colour-0", int(H * 0.05))
         self.grades = {g: self._load(f"ranking-{g}", int(H * 0.060))
@@ -54,142 +60,166 @@ class DanserHud:
         self.font = _font(int(H * 0.024))
         self.font_small = _font(int(H * 0.020))
         self.font_combo = _font(int(H * 0.072))   # PIL fallback for combo glyphs
+        # Argon health bar at STD's exact placement (ArgonSkin: HP_POS
+        # (50,20) lazer px, fixed Width=300 — the fractions below make the
+        # internal k == lk, so every lazer constant lands 1:1 like STD's).
         from .argon_health import ArgonHealth
-        self.argon_hp = ArgonHealth(self.w, self.h)
+        from .argon_hud import (HP_POS, HP_WIDTH, LAZER_UI_HEIGHT, ArgonHud,
+                                density_buckets)
+        lk = self.h / LAZER_UI_HEIGHT
+        self.argon_hp = ArgonHealth(self.w, self.h,
+                                    width_frac=HP_WIDTH * lk / self.w,
+                                    left_frac=HP_POS[0] * lk / self.w,
+                                    top_frac=HP_POS[1] / LAZER_UI_HEIGHT)
         self._hp_last_t = None
-        from .argon_counter import ArgonFont
-        self.argon_font = ArgonFont()  # procedural glyphs; no ripped assets
+        # key-counter input derivation state: previous catcher x (osu px).
+        # L/R held = the SIGN of the catcher's x movement since the last
+        # frame (replays store positions, not keys); dash comes straight
+        # from the replay frame's dash bit via the scene.
+        self._kc_prev_x = None
+        # STD's Argon counters (score / accuracy / combo + wedges + song
+        # progress) — argon_hud.py is the 1:1 port of the STD renderer's
+        # Argon HUD components (owner directive: identical HUD across modes)
+        starts = ([o.time_ms for o in getattr(beatmap, "objects", [])]
+                  or [first_ms])
+        self.argon = ArgonHud(self.w, self.h, first_ms, self.last_ms,
+                              density=density_buckets(starts, starts))
 
     # --- public ---------------------------------------------------------------
 
     def overlay(self, rgb: np.ndarray, scene) -> np.ndarray:
-        # Faithful osu!lazer **Argon** HUD layout (ArgonSkin.cs): health bar +
-        # score top-left (in a sheared wedge), combo bottom-left, accuracy + pp
-        # top-right — all in the real `argon-counter` texture font.
+        # Faithful osu!lazer **Argon** HUD (ArgonSkin.cs default layout),
+        # drawn by argon_hud.ArgonHud — the STD renderer's Argon score /
+        # accuracy / combo components ported 1:1 (owner directive 2026-07:
+        # catch's HUD must look identical to STD's; only platter + fruit
+        # differ per mode). Values (score/acc/combo/hp/pp) still come from
+        # catch's own sim — only the visual rendering is STD's.
         img = Image.fromarray(rgb, "RGB")
-        pad = int(self.w * 0.012)
-        W, H = self.w, self.h
-        af = self.argon_font
+        # An uploaded skin that ships its own number font drives a skin HUD
+        # (score/combo/accuracy from the skin's glyphs); skinless stays Argon.
+        if self._use_skin_hud:
+            return self._overlay_skin(img, scene)
+        ah = self.argon
+        t = float(scene.time_ms)
         cfg = self.cfg
-        def _on(n):
-            return cfg is None or getattr(cfg, n, True)
 
-        # ---- SCORE WEDGE (translucent panel UNDER the bar + score) ----
-        # lazer stacks several ArgonWedgePieces; draw two offset pieces so the
-        # overlap reads as a panel (faithful to ArgonSkin's wedgePieces).
+        def _on(n, default=True):
+            return cfg is None or getattr(cfg, n, default)
+
+        # ---- SCORE WEDGES (ArgonWedgePiece backdrops, UNDER bar + score) ----
         if _on("show_score") or _on("show_hp_bar"):
-            oy = self.argon_hp.bg.oy
-            wy = int(oy - 0.004 * H)
-            ww, wh = int(0.255 * W), int(0.130 * H)
-            self._argon_wedge(img, int(-0.020 * W), wy, ww, wh)
-            self._argon_wedge(img, int(0.008 * W), wy, ww, wh)
+            ah.draw_wedges(img)
 
-        # ---- HEALTH BAR (top-left) ----
+        # ---- HEALTH BAR (top-left; catch's argon_health at STD's spot) ----
         if _on("show_hp_bar"):
-            t = scene.time_ms
-            dt = 16.0 if self._hp_last_t is None else max(0.0, min(100.0, t - self._hp_last_t))
+            dt = (16.0 if self._hp_last_t is None
+                  else max(0.0, min(100.0, t - self._hp_last_t)))
             self._hp_last_t = t
             arr = np.asarray(img).copy()
             self.argon_hp.update_draw(arr, scene.hp, dt)
             img = Image.fromarray(arr)
-            # little 45x3 "healthLine" dash to the left of the bar (lazer detail)
-            k = self.argon_hp.k
-            ly = int(self.argon_hp.bg.oy + 10 * k)
-            lx = int(0.010 * W)
-            d = ImageDraw.Draw(img)
-            d.line([(lx, ly), (lx + int(45 * k), ly)], fill=(235, 235, 240), width=max(2, int(3 * k)))
+            # the 45×3 BoxElement healthLine at (0, 30) lazer px (STD detail)
+            ah.draw_health_line(img)
 
-        # ---- SCORE (top-left, in the wedge) ----
-        k = self.argon_hp.k
-        tube_bottom = int(self.argon_hp.bg.oy + 20 * k)        # bar tube bottom (left)
-        right_pad = int(0.018 * W)
-        # glyph content occupies rows 31..209 of the 240 cell (top/bottom pad 31)
-        _CTOP, _CBOT = 31.0 / 240.0, 209.0 / 240.0
         if _on("show_score"):
-            s_cell = int(H * 0.067)
-            s_img = af.render(f"{scene.score}", s_cell, tint=(1.0, 1.0, 1.0),
-                              min_slots=max(6, len(str(scene.score))))
-            # content top at ~0.054H
-            sy = int(0.054 * H - _CTOP * s_cell)
-            img.paste(s_img, (int(0.040 * W), sy), s_img)
+            # ---- SCORE (top-left, right edge x=250 lazer px, 6 wireframes) ----
+            ah.draw_score(img, t, scene.score)
+            # ---- ACCURACY (top-right) + STD's procedural grade badge ----
+            grade = None
+            if (_on("show_grade") and t >= self.first_ms
+                    and sum(scene.counts) > 0):
+                grade = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
+            ah.draw_accuracy(img, t, scene.accuracy, grade=grade)
+            # ---- PP (top-right, under accuracy; catch house element) ----
+            if (cfg is not None and getattr(cfg, "show_pp_counter", False)
+                    and scene.pp > 0):
+                ah.draw_pp(img, scene.pp)
 
-        # ---- ACCURACY (top-right) — integer big, ".00%" smaller & raised ----
-        acc_bottom = pad
-        if _on("show_score"):
-            a_cell = int(H * 0.040)
-            f_cell = int(a_cell * 0.60)
-            acc_str = f"{scene.accuracy * 100:.2f}"
-            int_part, frac_part = acc_str.split(".")
-            a_int = af.render(int_part, a_cell, tint=(1.0, 1.0, 1.0))
-            a_frac = af.render("." + frac_part + "%", f_cell, tint=(1.0, 1.0, 1.0))
-            ay = int(0.052 * H - _CTOP * a_cell)          # content top ~0.052H
-            right = W - right_pad
-            # frac content-top aligned to int content-top (superscript look)
-            fy = ay + int(_CTOP * a_cell - _CTOP * f_cell)
-            img.paste(a_frac, (right - a_frac.width, fy), a_frac)
-            img.paste(a_int, (right - a_frac.width - a_int.width, ay), a_int)
-            self._argon_label(img, "ACCURACY", int(H * 0.034), right_x=right)
-            acc_bottom = ay + int(_CBOT * a_cell)
+        # ---- COMBO (bottom-left ×1.3, pop + red break flash, '<n>x') ----
+        if _on("show_combo"):
+            ah.draw_combo(img, t, scene.combo)
 
-        # ---- PP (top-right, under accuracy) ----
-        if cfg is not None and getattr(cfg, "show_pp_counter", False) and scene.pp > 0:
-            p_cell = int(H * 0.034)
-            p_img = af.render(f"{scene.pp:.0f}", p_cell, tint=(1.0, 1.0, 1.0))
-            py = acc_bottom + int(H * 0.020)
-            self._argon_label(img, "PP", py - int(H * 0.020), right_x=W - right_pad)
-            img.paste(p_img, (W - right_pad - p_img.width, py), p_img)
+        # ---- ArgonSongProgress strip (bottom, 90% width) ----
+        if _on("show_progress"):
+            ah.draw_progress(img, t)
 
-        # ---- COMBO (bottom-left) ----
-        if scene.combo > 0 and _on("show_combo"):
-            c_cell = int(H * 0.051)
-            c_img = af.render(f"{scene.combo}x", c_cell, tint=(1.0, 1.0, 1.0))
-            cx = int(0.029 * W)
-            # content bottom at ~0.92H (lazer bottom-left combo)
-            cy = int(0.920 * H - _CBOT * c_cell)
-            self._argon_label(img, "COMBO", cy + int(_CTOP * c_cell) - int(H * 0.020), left_x=cx)
-            img.paste(c_img, (cx, cy), c_img)
-
-        # progress bar (bottom edge)
-        self._draw_progress(img, scene.time_ms)
+        # ---- Argon KEY COUNTER (bottom-right; B1=left B2=right B3=dash) ----
+        # Held states are derived, not stored: replays carry the catcher's
+        # absolute x + the dash bit, so L/R = the direction the catcher
+        # moved since the previous rendered frame (small deadzone kills
+        # interpolation jitter; real walk speed is ~8 osu px/frame at 60fps).
+        if _on("show_key_counter"):
+            x = float(getattr(scene, "catcher_x", 0.0))
+            dashing = bool(getattr(scene, "dashing", False))
+            dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
+            self._kc_prev_x = x
+            dead = 0.05                       # osu px per frame
+            ah.draw_key_counter(img, t, (dx < -dead, dx > dead, dashing))
 
         # watermark (bottom-right) — free renders are forced to the site URL
-        wm = getattr(self.cfg, "watermark", "") if self.cfg else ""
-        if wm:
-            d = ImageDraw.Draw(img)
-            wmf = _font(int(self.h * 0.022))
-            wb = d.textbbox((0, 0), wm, font=wmf)
-            d.text((self.w - pad - (wb[2] - wb[0]), self.h - pad - (wb[3] - wb[1]) - int(self.h * 0.006)),
-                   wm, font=wmf, fill=(238, 238, 245))
+        self._draw_watermark(img)
         return np.asarray(img)
 
-    def _argon_label(self, img, text, y, *, left_x=None, right_x=None):
-        """Small Torus-style caps label above a counter (light tracking)."""
-        d = ImageDraw.Draw(img)
-        lf = _font(int(self.h * 0.016))
-        chars = text.upper()
-        track = max(1, int(self.h * 0.0035))      # subtle letter-spacing
-        widths = [d.textlength(c, font=lf) for c in chars]
-        total = sum(widths) + track * (len(chars) - 1)
-        x = (right_x - total) if right_x is not None else left_x
-        for c, w in zip(chars, widths):
-            d.text((x, y), c, font=lf, fill=(202, 214, 230))
-            x += w + track
+    # --- skin HUD (per-element skin honoring) ---------------------------------
 
-    def _argon_wedge(self, img, x, y, w, h):
-        """ArgonWedgePiece — sheared (0.8) translucent #66CCFF panel, vertical
-        gradient alpha 0 (top) -> 0.25 (bottom)."""
-        skew = 0.8 * h
-        W2 = int(w + skew) + 2
-        grid_y = np.arange(h)[:, None].astype(np.float32)
-        grid_x = np.arange(W2)[None, :].astype(np.float32)
-        x_left = skew * (1.0 - grid_y / max(h, 1))          # top shifted right
-        inside = (grid_x >= x_left) & (grid_x < x_left + w)
-        alpha = (0.25 * (grid_y / max(h, 1)) * 255.0) * inside
-        rgba = np.zeros((h, W2, 4), np.uint8)
-        rgba[..., 0] = 0x66; rgba[..., 1] = 0xCC; rgba[..., 2] = 0xFF
-        rgba[..., 3] = np.clip(alpha, 0, 255).astype(np.uint8)
-        wedge = Image.fromarray(rgba, "RGBA")
-        img.paste(wedge, (int(x), int(y)), wedge)
+    def _overlay_skin(self, img, scene) -> np.ndarray:
+        """Legacy-skin HUD: draw score / accuracy / combo from the SKIN's own
+        number glyphs (STD-style per-element honoring), HP from the skin's
+        scorebar. Only reached when the skin ships a score font — skinless
+        renders never get here (they stay all-Argon). The catcher/fruit come
+        from the skin via scene.py; progress is a thin bar."""
+        cfg = self.cfg
+        W, H = self.w, self.h
+
+        def _on(n, default=True):
+            return cfg is None or getattr(cfg, n, default)
+
+        pad = int(W * 0.010)
+        top = int(H * 0.020)
+        # HP: skin scorebar (or its built-in PIL fallback when scorebar_bg is None)
+        if _on("show_hp_bar"):
+            self._draw_scorebar(img, max(0.0, min(1.0, scene.hp)))
+        # SCORE (top-right) + ACCURACY under it + grade badge
+        if _on("show_score"):
+            num = self._number(str(max(int(scene.score), 0)), self.score_glyphs, 0)
+            self._paste(img, num, W - pad - num.width, top)
+            acc_txt = f"{max(0.0, min(1.0, scene.accuracy)) * 100:.2f}%"
+            accg = self.acc_glyphs or self.score_glyphs
+            accimg = self._number(acc_txt, accg, 0)
+            acc_y = top + num.height + int(H * 0.006)
+            self._paste(img, accimg, W - pad - accimg.width, acc_y)
+            if (_on("show_grade") and scene.time_ms >= self.first_ms
+                    and sum(scene.counts) > 0):
+                g = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
+                gkey = {"SS": "X"}.get(g, g)      # SS uses the ranking-X sprite
+                gim = self.grades.get(gkey)
+                if gim is not None:
+                    self._paste(img, gim,
+                                W - pad - max(num.width, accimg.width)
+                                - int(W * 0.006) - gim.width, top)
+        # COMBO (bottom-left)
+        if _on("show_combo"):
+            cg = self.combo_glyphs or self.score_glyphs
+            cimg = self._number(f"{max(int(scene.combo), 0)}x", cg, 0)
+            self._paste(img, cimg, pad, H - pad - cimg.height)
+        # PROGRESS (thin bar, bottom)
+        if _on("show_progress"):
+            self._draw_progress(img, int(scene.time_ms))
+        # watermark (bottom-right)
+        self._draw_watermark(img)
+        return np.asarray(img)
+
+    def _draw_watermark(self, img) -> None:
+        wm = getattr(self.cfg, "watermark", "") if self.cfg else ""
+        if not wm:
+            return
+        pad = int(self.w * 0.012)
+        d = ImageDraw.Draw(img)
+        wmf = _font(int(self.h * 0.022))
+        wb = d.textbbox((0, 0), wm, font=wmf)
+        d.text((self.w - pad - (wb[2] - wb[0]),
+                self.h - pad - (wb[3] - wb[1]) - int(self.h * 0.006)),
+               wm, font=wmf, fill=(238, 238, 245))
 
     # --- compositing helpers --------------------------------------------------
 
@@ -257,6 +287,8 @@ class DanserHud:
     # --- loading --------------------------------------------------------------
 
     def _resolve(self, base: str) -> Path | None:
+        if self.dir is None:
+            return None
         for stem in (f"{base}@2x", base):
             p = self.dir / f"{stem}.png"
             if p.is_file():
