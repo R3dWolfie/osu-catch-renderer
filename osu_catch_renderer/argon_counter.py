@@ -1,23 +1,183 @@
 """osu!lazer **Argon** counter font (score / combo / accuracy / pp).
 
-Renders numbers with the real `argon-counter` texture glyphs lifted from
-ppy/osu-resources (`Textures/Gameplay/Fonts/argon-counter-*.png`) — the squared
-segmented numerals. Mirrors `ArgonCounterTextComponent`:
-  * glyphs are 240px cells displayed at 0.125x; advance = texWidth - 16 native px
-    (lazer's -2px display Spacing),
-  * a dim "wireframe" (all-segments) glyph sits behind every slot at
-    WireframeOpacity (0.25) — that's the ⊠ placeholder look for unlit digits.
+Draws the squared "argon-counter" numerals **procedurally** as rounded
+7-segment bars — the same licence-clean technique the osu!STANDARD renderer
+uses (osu_std_renderer/render/textures.py: `bake_argon_segment`,
+`bake_wireframe_cell`, `bake_wireframe_dot`, `_ARGON_SEG_MAP`). Nothing is
+loaded from ppy/osu-resources any more (the old CC-BY-NC
+`argon-counter-*.png` sprites are gone), so there is zero asset-licence
+concern and the counter matches STD's counter by construction.
+
+Mirrors `ArgonCounterTextComponent`:
+  * fixed-width 132x240 cells (aspect 0.55), displayed at the requested
+    cell height,
+  * the LIT glyph and the UNLIT "wireframes" (all-segments '8') backing come
+    from the SAME segment geometry on the SAME cell canvas, so lit + ghost
+    register BY CONSTRUCTION — the dim ⊠ placeholder look for unlit digits
+    (WireframeOpacity 0.25),
+  * '.'/'%'/'x' are drawn procedurally in the same segment weight; the '.'
+    slot gets its own small dot wireframe (matching STD) instead of a full '8'.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import math
 
 import numpy as np
 from PIL import Image
 
+# ---------------------------------------------------------------------------
+# Procedural 7-segment glyph baking — ported verbatim from the STD renderer
+# (osu_std_renderer/render/textures.py) so catch's counter is pixel-coherent
+# with STD's. Pure geometry: needs no font and no external assets.
+# ---------------------------------------------------------------------------
+
+_AA_PX = 1.5                      # texture-space anti-alias band (STD value)
+
+ARGON_SEG_W = 132                # one fixed-width digit cell (aspect 0.55)
+ARGON_SEG_H = 240
+# standard 7-segment map: A top, B upper-right, C lower-right, D bottom,
+# E lower-left, F upper-left, G middle.
+_ARGON_SEG_MAP = {
+    "0": "ABCDEF", "1": "BC", "2": "ABGED", "3": "ABGCD", "4": "FGBC",
+    "5": "AFGCD", "6": "AFGEDC", "7": "ABC", "8": "ABCDEFG", "9": "ABCDFG",
+}
+
+
+def _argon_seg_fields(width: int, height: int, seg_frac: float,
+                      gap_frac: float):
+    """(xx, yy, seg_alpha dict) for one segment cell — each of the seven
+    segments A..G as a rounded-bar alpha field (shared by the lit glyphs
+    and the all-segments wireframe backing)."""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    t = seg_frac * width                   # segment thickness
+    gap = gap_frac * height
+    m = t * 0.75                           # cell inset
+    x0, x1 = m, width - m
+    y0, ym, y1 = m, height / 2.0, height - m
+    half_v = (ym - y0) / 2.0
+
+    def hseg(cy: float) -> np.ndarray:
+        qx = np.abs(xx - width / 2.0) - (x1 - x0 - 2 * t - 2 * gap) / 2.0
+        qy = np.abs(yy - cy) - t / 2.0
+        d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+            + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
+        return np.clip(-d / _AA_PX, 0.0, 1.0)
+
+    def vseg(cx: float, cy: float) -> np.ndarray:
+        qx = np.abs(xx - cx) - t / 2.0
+        qy = np.abs(yy - cy) - (half_v - t / 2.0 - gap)
+        d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+            + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
+        return np.clip(-d / _AA_PX, 0.0, 1.0)
+
+    seg = {
+        "A": hseg(y0 + t / 2.0), "G": hseg(ym), "D": hseg(y1 - t / 2.0),
+        "F": vseg(x0 + t / 2.0, (y0 + ym) / 2.0),
+        "B": vseg(x1 - t / 2.0, (y0 + ym) / 2.0),
+        "E": vseg(x0 + t / 2.0, (ym + y1) / 2.0),
+        "C": vseg(x1 - t / 2.0, (ym + y1) / 2.0),
+    }
+    return xx, yy, seg
+
+
+def _argon_seg_char_alpha(char: str, xx, yy, seg,
+                          width: int, height: int, seg_frac: float):
+    """Alpha field for one glyph — a subset of the seven segments for a
+    digit, or a procedural '.'/'%'/'x' in the same segment weight."""
+    t = seg_frac * width
+    if char in _ARGON_SEG_MAP:
+        a = np.zeros((height, width))
+        for s in _ARGON_SEG_MAP[char]:
+            a = np.maximum(a, seg[s])
+        return a
+    if char in (".", "dot"):
+        r = t * 0.85
+        cx, cy = width / 2.0, height - t * 0.75 - r
+        d = np.hypot(xx - cx, yy - cy)
+        return np.clip((r - d) / _AA_PX, 0.0, 1.0)
+    if char in ("%", "percent"):
+        # A clean percent: two OPEN rings (upper-left + lower-right) joined by
+        # a bold diagonal slash. A wider ring band keeps a clear centre hole so
+        # the rings don't collapse to dots when the counter is small.
+        rr = height * 0.135                # ring radius
+        band = t * 0.5                     # ring HALF-thickness → open centre
+        cxu, cyu = width * 0.31, height * 0.205
+        cxl, cyl = width * 0.69, height * 0.795
+        du = np.abs(np.hypot(xx - cxu, yy - cyu) - rr)
+        dl = np.abs(np.hypot(xx - cxl, yy - cyl) - rr)
+        ring = np.maximum(np.clip((band - du) / _AA_PX, 0.0, 1.0),
+                          np.clip((band - dl) / _AA_PX, 0.0, 1.0))
+        # diagonal slash from bottom-left to top-right
+        mm = t * 0.95
+        dirx, diry = (width - 2 * mm), -(height - 2 * mm)
+        L = math.hypot(dirx, diry)
+        nx, ny = -diry / L, dirx / L
+        px, py = xx - width / 2.0, yy - height / 2.0
+        dperp = np.abs(px * nx + py * ny)
+        dalong = np.abs(px * (dirx / L) + py * (diry / L))
+        slash = (np.clip((t * 0.42 - dperp) / _AA_PX, 0.0, 1.0)
+                 * np.clip((L / 2.0 - dalong) / _AA_PX, 0.0, 1.0))
+        return np.maximum(ring, slash)
+    if char in ("x",):
+        th = t * 0.60
+        arm = height * 0.24
+        px, py = xx - width / 2.0, yy - height * 0.5
+        s2 = 1.0 / math.sqrt(2.0)
+        d1 = np.abs((px - py) * s2)
+        d2 = np.abs((px + py) * s2)
+        reach = np.clip((arm - np.hypot(px, py)) / _AA_PX, 0.0, 1.0)
+        return np.maximum(np.clip((th - d1) / _AA_PX, 0.0, 1.0),
+                          np.clip((th - d2) / _AA_PX, 0.0, 1.0)) * reach
+    return np.zeros((height, width))
+
+
+def bake_argon_segment(char: str, width: int = ARGON_SEG_W,
+                       height: int = ARGON_SEG_H, seg_frac: float = 0.14,
+                       gap_frac: float = 0.045) -> np.ndarray:
+    """A single lit Argon-counter glyph (white, tintable): digit segments
+    or the '.'/'%'/'x' symbols, on the shared cell canvas."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, gap_frac)
+    a = _argon_seg_char_alpha(char, xx, yy, seg, width, height, seg_frac)
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_wireframe_cell(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
+                        seg_frac: float = 0.14,
+                        gap_frac: float = 0.045) -> np.ndarray:
+    """The all-segments '8' wireframe backing (WireframeOpacity 0.25). Same
+    segment geometry as the lit glyphs, so a lit digit registers exactly on
+    top of its own wireframe cell."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, gap_frac)
+    a = np.zeros((height, width))
+    for s in "ABCDEFG":
+        a = np.maximum(a, seg[s])
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(a * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_wireframe_dot(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
+                       seg_frac: float = 0.14) -> np.ndarray:
+    """The '.' wireframe backing (a dot) — matches the lit '.' glyph."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, 0.045)
+    a = _argon_seg_char_alpha(".", xx, yy, seg, width, height, seg_frac)
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return rgba
+
+
+# ---------------------------------------------------------------------------
+# ArgonFont — same public interface as before (measure / render), but the
+# glyphs are baked procedurally instead of loaded from PNGs. All cells are a
+# fixed 132x240 (STD's monospace 7-segment cell), advanced edge-to-edge to
+# match STD's `argon_seg_advance` (= cell width / height).
+# ---------------------------------------------------------------------------
+
 _LOOKUP = {".": "dot", "%": "percentage", "x": "x", "#": "wireframes"}
-_NATIVE = 240.0
-_SPACING_NATIVE = 16.0          # lazer Spacing -2 at 0.125 display => 16 native px
+_NATIVE = float(ARGON_SEG_H)     # 240 — cell height the metrics are relative to
+_SPACING_NATIVE = 0.0            # STD packs cells edge-to-edge (advance = width)
 _WIREFRAME_OPACITY = 0.25
 
 
@@ -27,15 +187,24 @@ def _lookup(ch: str) -> str:
     return _LOOKUP.get(ch, ch)
 
 
+def _to_image(rgba: np.ndarray) -> Image.Image:
+    return Image.fromarray(rgba, "RGBA")
+
+
 class ArgonFont:
-    def __init__(self, asset_dir: Path):
-        self.dir = Path(asset_dir)
+    """Procedural Argon-counter font. ``asset_dir`` is accepted for call-site
+    compatibility but IGNORED — no PNG assets are read."""
+
+    def __init__(self, asset_dir=None):
         self.glyphs: dict[str, Image.Image] = {}
-        for name in [str(i) for i in range(10)] + ["dot", "percentage", "x", "wireframes"]:
-            p = self.dir / f"argon-counter-{name}.png"
-            if p.is_file():
-                self.glyphs[name] = Image.open(p).convert("RGBA")
-        self._wf = self.glyphs.get("wireframes")
+        for ch in "0123456789":
+            self.glyphs[ch] = _to_image(bake_argon_segment(ch))
+        self.glyphs["dot"] = _to_image(bake_argon_segment("."))
+        self.glyphs["percentage"] = _to_image(bake_argon_segment("%"))
+        self.glyphs["x"] = _to_image(bake_argon_segment("x"))
+        self.glyphs["wireframes"] = _to_image(bake_wireframe_cell())
+        self._wf = self.glyphs["wireframes"]
+        self._wf_dot = _to_image(bake_wireframe_dot())
 
     def _glyph(self, ch: str):
         return self.glyphs.get(_lookup(ch))
@@ -84,10 +253,14 @@ class ArgonFont:
         canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         x = 0.0
         for ch in slots:
-            # wireframe backing behind every slot (digits + leading placeholders)
-            if self._wf is not None and wf_opacity > 0:
-                wf = self._tinted(self._wf, scale, tint, wf_opacity)
-                canvas.alpha_composite(wf, (int(round(x)), 0))
+            # wireframe backing behind every slot (digits + leading placeholders).
+            # '.' slots get the small dot wireframe (matching STD) instead of the
+            # full all-segments '8'.
+            if wf_opacity > 0:
+                wf_src = self._wf_dot if ch == "." else self._wf
+                if wf_src is not None:
+                    wf = self._tinted(wf_src, scale, tint, wf_opacity)
+                    canvas.alpha_composite(wf, (int(round(x)), 0))
             if ch is not None:
                 g = self._glyph(ch)
                 if g is not None:

@@ -43,8 +43,15 @@ def render_catch(
     audio = audio if (audio and audio.is_file()) else None
     bg = bm.background and (beatmap_dir / bm.background)
     bg = bg if (bg and bg.is_file()) else None
+    # replay md5 → so the results-screen leaderboard can exclude THIS render's
+    # own DB row from the flanks (mirrors the std renderer).
+    try:
+        replay_md5 = hashlib.md5(Path(osr_path).read_bytes()).hexdigest()
+    except Exception:  # noqa: BLE001 — hashing never blocks a render
+        replay_md5 = ""
     return render_core(bm, frames, meta, output_path, cfg, audio=audio, bg=bg,
-                       progress_callback=progress_callback, osu_path=osu_path)
+                       progress_callback=progress_callback, osu_path=osu_path,
+                       replay_md5=replay_md5)
 
 
 def render_core(
@@ -58,6 +65,7 @@ def render_core(
     bg: Path | None = None,
     progress_callback=None,
     osu_path: Path | None = None,
+    replay_md5: str = "",
 ) -> Path:
     """Render from already-parsed beatmap/frames/meta. Shared by the osr path
     and tests."""
@@ -91,6 +99,10 @@ def render_core(
         start_ms = int(first - preempt - cfg.lead_in_ms)
     else:
         start_ms = min(0, int(first - preempt - cfg.lead_in_ms))
+    # intro R3D splash window opens at the render's first frame (no seizure
+    # card in catch, so it begins immediately -- std offsets by the seizure
+    # duration). The sim fades it out at the first fruit's approach.
+    sim.logo_start_ms = start_ms if cfg.show_logo else None
     gameplay_end_ms = int(last + cfg.tail_ms)
     # results outro (matches osu_renderer: 800ms gap, then the card) — on by default
     RESULTS_GAP_MS, FADE_MS = 800, 400
@@ -127,6 +139,8 @@ def render_core(
     renderer.upload_texture("catch_beam", catch_beam_rgba())
     renderer.upload_texture("argon_fruit_ring", argon_fruit_ring_rgba())
     renderer.upload_texture("argon_fruit_dot", argon_fruit_dot_rgba())
+    from .assets import bake_logo_tile
+    renderer.upload_texture("logo_tile", bake_logo_tile())
     if bg is not None:
         renderer.upload_texture("bg", _bg_cover(bg, w, h, cfg.bg_blur))
 
@@ -139,6 +153,18 @@ def render_core(
         hud = _Hud(w, h, meta, bm)
 
     from .hud import draw_results
+    # results-screen map leaderboard (parity with std): build + bake ONCE, up
+    # front, so the outro just composites the pre-baked cards each frame. Fully
+    # fail-soft — any problem leaves the plain results card (renders unchanged).
+    baked_board = None
+    if cfg.show_results and getattr(cfg, "show_leaderboard", True):
+        try:
+            from .lb_cards import build_catch_board
+            baked_board = build_catch_board(cfg, meta, bm, replay_md5)
+        except Exception as e:  # noqa: BLE001 — a board must never break a render
+            import sys
+            print(f"[catch-renderer] leaderboard skipped: {e}", file=sys.stderr)
+            baked_board = None
     last_gameplay = None
     try:
         for i in range(n_frames):
@@ -158,7 +184,14 @@ def render_core(
                     renderer.read_rgb()
                 if cfg.show_results and t >= results_start_ms:
                     op = min(1.0, (t - results_start_ms) / FADE_MS)
-                    rgb = draw_results(rgb, meta, bm, op)
+                    # age_ms drives the lazer results screen's two-stage
+                    # animation (arc sweep / grade punch / score roll / card
+                    # slide-in, then the stage-2 stats panels unfolding from
+                    # the right); osu_path lets it compute stars + pp (rosu);
+                    # sim feeds the stage-2 COMBO panel its checkpoint series.
+                    rgb = draw_results(rgb, meta, bm, op, board=baked_board,
+                                       age_ms=float(t - results_start_ms),
+                                       osu_path=osu_path, sim=sim)
             try:
                 proc.stdin.write(rgb.tobytes())
             except BrokenPipeError:

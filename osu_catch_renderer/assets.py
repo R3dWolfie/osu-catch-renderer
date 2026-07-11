@@ -6,6 +6,8 @@ match osu!catch's default fruit palette.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -118,6 +120,41 @@ def argon_fruit_dot_rgba(n: int = 64) -> np.ndarray:
     img[..., :3] = 255
     img[..., 3] = (np.clip(a, 0, 1) * 255).astype(np.uint8)
     return img
+
+
+# --- R3D intro logo splash ---------------------------------------------------
+# The glossy beveled 'R' tile shown during the intro (show_logo), fading out
+# as the first fruit begins its approach. Ported from the std renderer
+# (osu_std_renderer.render.textures.bake_logo_tile): load R3D's REAL logo
+# asset (own IP, license-clean -- the SAME logo.png the std splash uses, so
+# the splash is identical across modes) and fall back to a simple procedural
+# red 'R' tile only if the asset is missing.
+LOGO_TILE_RED = (216, 44, 54)
+
+
+def bake_logo_tile(size: int = 256) -> np.ndarray:
+    """RGBA tile for the intro splash. Prefers assets/logo.png (the real R3D
+    logo); procedural fallback (rounded red tile + white R) only if missing."""
+    try:
+        lp = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+        im = Image.open(lp).convert("RGBA").resize((size, size), Image.LANCZOS)
+        return np.asarray(im, dtype=np.uint8).copy()
+    except Exception:
+        pass
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    drw = ImageDraw.Draw(img)
+    drw.rounded_rectangle([0, 0, size - 1, size - 1],
+                          radius=int(size * 0.18), fill=LOGO_TILE_RED + (255,))
+    try:
+        from .fonts import font as _font
+        f = _font(int(size * 0.66))
+        box = f.getbbox("R")
+        rw, rh = box[2] - box[0], box[3] - box[1]
+        drw.text(((size - rw) / 2.0 - box[0], (size - rh) / 2.0 - box[1]),
+                 "R", font=f, fill=(255, 255, 255, 255))
+    except Exception:
+        pass
+    return np.asarray(img, dtype=np.uint8).copy()
 
 
 def build_textures() -> dict[str, np.ndarray]:

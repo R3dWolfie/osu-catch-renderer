@@ -57,6 +57,7 @@ class CatchBeatmap:
     title: str = ""
     artist: str = ""
     version: str = ""
+    creator: str = ""   # mapper (the results screen's "mapped by …")
     rate: float = 1.0   # playback rate (DT/NC=1.5, HT=0.75); times already scaled
 
     @property
@@ -84,6 +85,9 @@ class ReplayMeta:
     # life-bar graph. None = the play passed / no fail detected. Used to
     # end the render at death instead of rendering the unplayed remainder.
     death_ms: int | None = None
+    # When the play happened (osrparse's parsed .osr timestamp, a datetime);
+    # None when unavailable. The results screen's "Played on …" footer.
+    timestamp: object = None
 
 
 @dataclass
@@ -127,6 +131,17 @@ class RenderConfig:
     show_hp_bar: bool = True
     show_grade: bool = True
     show_mods: bool = True
+    # intro R3D "R" splash (parity with std show_logo; off by default so
+    # existing renders are unchanged)
+    show_logo: bool = False
+    # results-screen map leaderboard (parity with the std renderer): the featured
+    # play flanked by compact ranked cards of the OTHER renders of this map.
+    # Default source = the local render DB; "osu" reads the bot-written osu!
+    # global scores JSON (falls back to the DB when absent). Default-on but a
+    # no-op when the map has no other renders, so existing renders are unchanged.
+    show_leaderboard: bool = True
+    leaderboard_source: str = "r3d"      # r3d | osu
+    leaderboard_json: Path | None = None
 
 
 @dataclass

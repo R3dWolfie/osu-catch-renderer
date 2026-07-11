@@ -92,6 +92,7 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False) -> CatchBea
         title=meta.get("Title", ""),
         artist=meta.get("Artist", ""),
         version=meta.get("Version", ""),
+        creator=meta.get("Creator", ""),
     )
 
 

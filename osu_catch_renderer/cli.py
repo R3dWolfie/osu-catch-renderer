@@ -55,6 +55,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--show-hp", action=BA, default=True)
     ap.add_argument("--show-grade", action=BA, default=True)
     ap.add_argument("--show-mods", action=BA, default=True)
+    ap.add_argument("--logo", action=BA, default=False,
+                    help="show_logo: the R3D 'R' tile splash during the intro, "
+                         "fading out as gameplay starts (parity with std)")
+    ap.add_argument("--leaderboard", action=BA, default=True,
+                    help="per-map render leaderboard on the results screen "
+                         "(featured play flanked by other renders of the same "
+                         "map, from the local render DB); default on")
+    ap.add_argument("--leaderboard-source", choices=("r3d", "osu"),
+                    default="r3d",
+                    help="flank-card source: 'r3d' = the local render DB "
+                         "(default), 'osu' = the map's osu! GLOBAL top scores "
+                         "from --leaderboard-json (silently falls back to r3d "
+                         "when that file is missing/empty/invalid)")
+    ap.add_argument("--leaderboard-json", type=Path, default=None,
+                    help="path to the bot-written osu! global scores JSON "
+                         "(only read when --leaderboard-source osu)")
     args = ap.parse_args(argv)
 
     cfg = RenderConfig(
@@ -87,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         show_hp_bar=args.show_hp,
         show_grade=args.show_grade,
         show_mods=args.show_mods,
+        show_logo=args.logo,
+        show_leaderboard=args.leaderboard,
+        leaderboard_source=args.leaderboard_source,
+        leaderboard_json=args.leaderboard_json,
     )
     if args.results_seconds is not None:
         cfg.results_ms = int(args.results_seconds * 1000)

@@ -74,6 +74,12 @@ class CatchSim:
         # Hidden (HD, mod bit 8): fruits fade out as they near the catcher.
         self.hidden = bool((getattr(meta, "mods", 0) or 0) & 8)
         self.half = cs_to_catcher_half_width(beatmap.cs)
+        # R3D intro splash (show_logo): render.py sets logo_start_ms when the
+        # flag is on; the splash fades out exactly as the first fruit begins
+        # its approach (first object time - preempt), matching the std splash.
+        self.logo_start_ms: float | None = None
+        self.first_spawn_ms = (min((o.time_ms for o in self._objs), default=0)
+                               - self.preempt)
 
         w, h = cfg.resolution
         self.screen_w, self.screen_h = w, h
@@ -331,6 +337,10 @@ class CatchSim:
                                     texture_key=None, color=(0, 0, 0, 0.92)))
             s.sprites.append(Sprite(self.screen_w / 2, self.screen_h - bar / 2,
                                     self.screen_w, bar, texture_key=None, color=(0, 0, 0, 0.92)))
+
+        # R3D intro splash -- topmost intro element, over the idle scene
+        if self.logo_start_ms is not None:
+            s.sprites.extend(self._logo_sprites(t_ms))
 
         cp = self.state_at(t_ms)
         s.combo = cp.combo
@@ -590,3 +600,22 @@ class CatchSim:
                               color=(gtint[0], gtint[1], gtint[2], alpha * 0.30),
                               additive=True))
         return out
+
+    def _logo_sprites(self, t_ms: int) -> list[Sprite]:
+        """The R3D 'R' tile intro splash (show_logo), fading out exactly as the
+        first fruit begins its approach -- ported from the std renderer's
+        _draw_logo so the splash is identical across modes."""
+        from .effects import logo_alpha, logo_scale, LOGO_UI_SIZE
+        la = logo_alpha(t_ms, self.logo_start_ms, self.first_spawn_ms)
+        if la is None:
+            return []
+        k_ui = self.screen_h / 1080.0
+        d = LOGO_UI_SIZE * k_ui * logo_scale(t_ms, self.logo_start_ms)
+        cx = self.screen_w / 2.0
+        cy = self.screen_h * 0.44
+        return [
+            Sprite(cx, cy, d * 1.9, d * 1.9, texture_key="catch_glow",
+                   color=(0.95, 0.28, 0.30, 0.45 * la), additive=True),
+            Sprite(cx, cy, d, d, texture_key="logo_tile",
+                   color=(1.0, 1.0, 1.0, la)),
+        ]

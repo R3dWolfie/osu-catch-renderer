@@ -189,6 +189,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         grade=_grade(acc, r),
         game_version=int(getattr(r, "game_version", 0) or 0),
         death_ms=death_ms,
+        timestamp=getattr(r, "timestamp", None),
     )
     return frames, meta
 

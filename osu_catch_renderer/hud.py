@@ -58,7 +58,7 @@ class DanserHud:
         self.argon_hp = ArgonHealth(self.w, self.h)
         self._hp_last_t = None
         from .argon_counter import ArgonFont
-        self.argon_font = ArgonFont(Path(__file__).parent / "argon_assets")
+        self.argon_font = ArgonFont()  # procedural glyphs; no ripped assets
 
     # --- public ---------------------------------------------------------------
 
@@ -370,11 +370,64 @@ def _ellipsize(draw, text: str, font, max_w: int) -> str:
     return (text + "…") if text else ""
 
 
-def draw_results(rgb, meta, bm, opacity: float):
-    """Post-game results card, matching osu_renderer's _draw_results_overlay
+# the per-render lazer results screen (baked once, drawn per outro frame).
+# Keyed on id(meta) so a long-lived process can render several replays;
+# False = the bake failed once → stay on the legacy card for this render.
+_LAZER_RESULTS: dict = {}
+
+
+def draw_results(rgb, meta, bm, opacity: float, board=None, age_ms=None,
+                 osu_path=None, sim=None):
+    """The osu!catch RESULTS SCREEN — the osu!(lazer) ranking screen, the
+    faithful port of the std renderer's render/lazer_results.py (owner spec
+    2026-07: results-screen parity with std). The screen itself lives in
+    lazer_results.CatchLazerResults: black background, the AccuracyCircle
+    (arc + graded ring + rank badges + glowing grade letter), the rounded
+    featured panel with catch's Fruit/Drop/Droplet/Miss judgments, and the
+    flank leaderboard cards laid out around it exactly like std.
+
+    `age_ms` (ms since the results started) drives the ported two-stage
+    animation (stage-1 reveal, then the stage-2 stats panels unfolding from
+    the right); None (legacy callers) renders the settled screen. `sim` (the
+    CatchSim) feeds the stage-2 COMBO panel its checkpoint series; None →
+    the panel falls back to the rosu strain curve. Fully fail-soft: any
+    problem falls back to the legacy text card — LOUDLY."""
+    try:
+        key = id(meta)
+        scr = _LAZER_RESULTS.get(key)
+        if scr is None:
+            from .lazer_results import CatchLazerResults
+            _LAZER_RESULTS.clear()          # one render at a time
+            scr = CatchLazerResults((rgb.shape[1], rgb.shape[0]), meta, bm,
+                                    board=board, osu_path=osu_path, sim=sim)
+            _LAZER_RESULTS[key] = scr
+        if scr is False:                    # earlier bake failed → legacy
+            return _draw_results_legacy(rgb, meta, bm, opacity, board=board)
+        return scr.render_frame(rgb, opacity, age_ms)
+    except Exception as e:  # noqa: BLE001 — results must never kill a render
+        import sys
+        import traceback
+        print("[catch-renderer] !!! LAZER RESULTS SCREEN FAILED — falling "
+              f"back to the legacy results card: {e}", file=sys.stderr)
+        traceback.print_exc()
+        _LAZER_RESULTS[id(meta)] = False
+        return _draw_results_legacy(rgb, meta, bm, opacity, board=board)
+
+
+def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
+    """LEGACY results card (pre-2026-07 lazer-parity port) — the centred text
+    stack over the dimmed gameplay frame. Kept intact as the fail-soft
+    fallback for draw_results and for an emergency revert.
+
+    Post-game results card, matching osu_renderer's _draw_results_overlay
     (same vertical stack, sizes, grade colours, font) for cross-mode
     consistency — minus mania's UR/histogram, which catch has no concept of.
     Uses the replay's authoritative counts.
+
+    `board` (an lb_cards.BakedBoard | None): the per-map render leaderboard —
+    compact ranked flank cards of the OTHER renders of this map, drawn around
+    the centred stack (parity with the std renderer). None (leaderboard off /
+    solo render / no other renders) → the plain results card, UNCHANGED.
     """
     import numpy as np
     a = max(0.0, min(1.0, opacity))
@@ -405,6 +458,18 @@ def draw_results(rgb, meta, bm, opacity: float):
     line(56, f"{acc:.2f}%", (235, 235, 245), 10)
     line(40, f"Max combo {meta.max_combo}x", (200, 200, 220), 24)
 
+    # When the map leaderboard is shown, the flank cards hug a centre column of
+    # `CENTER_CLEAR_FRAC * W`; render the wide judgment row as a 2×2 grid and the
+    # caption as the player name alone so the featured stack stays inside that
+    # column and never collides with the flanks. Boardless → the original single
+    # judgment row + full player·title caption (existing renders unchanged).
+    compact = board is not None and getattr(board, "compact", False)
+    if compact:
+        from .lb_cards import CENTER_CLEAR_FRAC
+        col_w = int(W * CENTER_CLEAR_FRAC * 0.98)
+    else:
+        col_w = int(W * 0.92)
+
     # catch judgment row: Fruit / Drop / Droplet / Miss, colour-coded
     cells = [("Fruit", meta.count_300, (255, 230, 120)),
              ("Drop", meta.count_100, (140, 220, 140)),
@@ -414,18 +479,49 @@ def draw_results(rgb, meta, bm, opacity: float):
     rendered = [(f"{lab}: {cnt}", col) for lab, cnt, col in cells]
     widths = [d.textbbox((0, 0), t, font=f36)[2] for t, _ in rendered]
     gap = 28
-    x = cx - (sum(widths) + gap * (len(rendered) - 1)) // 2
-    for (t, col), w in zip(rendered, widths):
-        d.text((x, y), t, font=f36, fill=(*col, A))
-        x += w + gap
+    row_h = d.textbbox((0, 0), "Ay", font=f36)[3] + 14
+    if compact:
+        # 2×2 grid, two centred cells per row
+        for r in range(2):
+            pair = rendered[2 * r:2 * r + 2]
+            pw = widths[2 * r:2 * r + 2]
+            x = cx - (sum(pw) + gap * (len(pair) - 1)) // 2
+            for (t, col), w in zip(pair, pw):
+                d.text((x, y), t, font=f36, fill=(*col, A))
+                x += w + gap
+            y += row_h
+        title_y = y + 12
+    else:
+        x = cx - (sum(widths) + gap * (len(rendered) - 1)) // 2
+        for (t, col), w in zip(rendered, widths):
+            d.text((x, y), t, font=f36, fill=(*col, A))
+            x += w + gap
+        title_y = y + 70
 
-    title = f"{bm.artist} - {bm.title} [{bm.version}]".strip(" -")
     rf = _font(26)
-    full = _ellipsize(d, f"{meta.player_name}  ·  {title}", rf, int(W * 0.92))
+    if compact:
+        # the map title already rides the leaderboard banner up top; keep the
+        # caption to the player so it fits the centre column.
+        caption = meta.player_name
+    else:
+        title = f"{bm.artist} - {bm.title} [{bm.version}]".strip(" -")
+        caption = f"{meta.player_name}  ·  {title}"
+    full = _ellipsize(d, caption, rf, col_w)
     fb = d.textbbox((0, 0), full, font=rf)
-    d.text((cx - (fb[2] - fb[0]) // 2, y + 70), full, font=rf, fill=(180, 180, 200, A))
+    d.text((cx - (fb[2] - fb[0]) // 2, title_y), full, font=rf, fill=(180, 180, 200, A))
 
-    return np.asarray(Image.alpha_composite(img, layer).convert("RGB"))
+    out = Image.alpha_composite(img, layer)
+    # per-map render leaderboard: flank cards around the centred stack (parity
+    # with the std renderer). No-op when there's no board → renders unchanged.
+    # Fail-soft: a compositing error must never crash the render mid-loop; the
+    # frame just falls back to the plain results card.
+    if board is not None:
+        try:
+            from .lb_cards import draw_board
+            draw_board(out, board, opacity)
+        except Exception:  # noqa: BLE001 — a board never breaks a render
+            pass
+    return np.asarray(out.convert("RGB"))
 
 
 from .fonts import font as _font  # skin-aware, host-robust font resolver
