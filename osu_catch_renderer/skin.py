@@ -34,6 +34,15 @@ class CatchSkin:
         if default_dir:
             default_dir = self._resolve_root(default_dir)
         self.dirs = [d for d in (skin_dir, default_dir) if d and d.is_dir()]
+        # the USER's chosen skin dir (resolved) — combo_colors_custom is
+        # scoped to it: only a skin the user actually picked may beat the
+        # beatmap's [Colours] (lazer rule — scene._combo_tint). The bundled
+        # service default ("_default-source" / Night05) ships Combo1..4 but
+        # is nobody's choice, so it must never override the map's palette.
+        self._user_skin_dir = (
+            skin_dir if (skin_dir and Path(skin_dir).is_dir()
+                         and Path(skin_dir).name != "_default-source")
+            else None)
         self.textures: dict[str, np.ndarray] = {}
         self._load_elements()
         self.combo_colors = self._load_combos()
@@ -99,6 +108,9 @@ class CatchSkin:
                 self.textures[key] = tex
 
     def _load_combos(self) -> list[tuple[float, float, float]]:
+        # combo_colors_custom: True only when the combos came from the
+        # USER's chosen skin's own skin.ini (see __init__ / _combo_tint).
+        self.combo_colors_custom = False
         for d in self.dirs:
             ini = d / "skin.ini"
             if not ini.is_file():
@@ -116,6 +128,7 @@ class CatchSkin:
                     except ValueError:
                         continue
             if combos:
+                self.combo_colors_custom = (d == self._user_skin_dir)
                 return [combos[k] for k in sorted(combos)]
         return list(_DEFAULT_COMBOS)
 

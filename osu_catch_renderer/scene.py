@@ -438,12 +438,19 @@ class CatchSim:
                     (0.070, 0.486, 1.0), (0.949, 0.094, 0.224))
 
     def _combo_tint(self, combo_index: int) -> tuple[float, float, float]:
-        cc = self.bm.combo_colors                       # .osu [Colours] win (lazer)
+        # lazer precedence: a USER skin that ships its own [Colours]
+        # (skin.ini Combo1..N → CatchSkin.combo_colors_custom) keeps them
+        # over the map's; else the .osu [Colours]; else the skin palette
+        # (default-skin ini fallback); else lazer's default combo colours.
+        sk = self.skin
+        if sk is not None and getattr(sk, "combo_colors_custom", False):
+            return sk.combo_color(combo_index)
+        cc = self.bm.combo_colors
         if cc:
             r, g, b = cc[combo_index % len(cc)]
             return (r / 255.0, g / 255.0, b / 255.0)
-        if self.skin is not None:
-            return self.skin.combo_color(combo_index)
+        if sk is not None:
+            return sk.combo_color(combo_index)
         return self._LAZER_COMBO[combo_index % len(self._LAZER_COMBO)]
 
     def _object_sprites(self, obj, x, y, t_ms) -> list[Sprite]:
