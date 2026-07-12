@@ -438,6 +438,10 @@ class CatchSim:
                     (0.070, 0.486, 1.0), (0.949, 0.094, 0.224))
 
     def _combo_tint(self, combo_index: int) -> tuple[float, float, float]:
+        cc = self.bm.combo_colors                       # .osu [Colours] win (lazer)
+        if cc:
+            r, g, b = cc[combo_index % len(cc)]
+            return (r / 255.0, g / 255.0, b / 255.0)
         if self.skin is not None:
             return self.skin.combo_color(combo_index)
         return self._LAZER_COMBO[combo_index % len(self._LAZER_COMBO)]
@@ -541,7 +545,7 @@ class CatchSim:
                 return self._argon_object(obj, x, y, t_ms)
             # lazer: large droplet (slider tick) ~ half a fruit, tiny ~ quarter
             size = self.fruit_screen * (0.55 if obj.kind is ObjType.DROPLET else 0.30)
-            return self._base_overlay("fruit-drop", x, y, size, sk.combo_color(obj.combo_index))
+            return self._base_overlay("fruit-drop", x, y, size, self._combo_tint(obj.combo_index))
         if obj.kind is ObjType.BANANA:
             if not sk.has("fruit-bananas"):
                 return self._argon_object(obj, x, y, t_ms)
@@ -556,7 +560,7 @@ class CatchSim:
             return self._argon_object(obj, x, y, t_ms)
         hyper = obj.hyperdash and self.cfg.show_hyperdash
         size = self.fruit_screen * (1.32 if hyper else 1.05)
-        tint = (1.0, 0.35, 0.35) if hyper else sk.combo_color(obj.combo_index)
+        tint = (1.0, 0.35, 0.35) if hyper else self._combo_tint(obj.combo_index)
         # gentle spin while falling, deterministic per fruit
         rot = 0.0
         if self.cfg.fruit_rotation:

@@ -93,6 +93,7 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False) -> CatchBea
         artist=meta.get("Artist", ""),
         version=meta.get("Version", ""),
         creator=meta.get("Creator", ""),
+        combo_colors=_parse_combo_colors(sections.get("Colours", "")),
     )
 
 
@@ -507,6 +508,21 @@ def _kv(block: str) -> dict[str, str]:
             k, v = line.split(":", 1)
             out[k.strip()] = v.strip()
     return out
+
+
+def _parse_combo_colors(block: str) -> list:
+    """[Colours] Combo1..N -> RGB tuples in ascending combo index (osu!)."""
+    combos = {}
+    for k, v in _kv(block).items():
+        kl = k.lower()
+        if kl.startswith("combo") and kl[5:].isdigit():
+            p = [t.strip() for t in v.split(",")]
+            if len(p) >= 3:
+                try:
+                    combos[int(kl[5:])] = (int(p[0]), int(p[1]), int(p[2]))
+                except ValueError:
+                    continue
+    return [combos[i] for i in sorted(combos)]
 
 
 def _parse_breaks(events: str) -> list:

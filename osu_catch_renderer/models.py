@@ -59,6 +59,7 @@ class CatchBeatmap:
     version: str = ""
     creator: str = ""   # mapper (the results screen's "mapped by …")
     rate: float = 1.0   # playback rate (DT/NC=1.5, HT=0.75); times already scaled
+    combo_colors: list = field(default_factory=list)   # [Colours] Combo1..N (RGB)
 
     @property
     def length_ms(self) -> int:
