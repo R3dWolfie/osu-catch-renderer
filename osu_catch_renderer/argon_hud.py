@@ -766,7 +766,9 @@ class ArgonHud:
         info_h = ARGON_INFO_H * es
         info_y = self._pbottom - self._bar_h * 2.0 - info_h - 2.0 * es
         cur = _fmt_time((t - self.first_t) / 1000.0)
-        left = _fmt_time((self.last_t - t) / 1000.0)
+        # clamp remaining to >= 0 — frames after the last object briefly
+        # flashed "-0:01" (2026-07-22 polish)
+        left = _fmt_time(max(self.last_t - t, 0.0) / 1000.0)
         self._lrun(img, cur, self._px0, info_y, info_h, (1, 1, 1),
                    0.9 * self.op, mono=True)
         wl = self._lrun_width(left, info_h, mono=True)

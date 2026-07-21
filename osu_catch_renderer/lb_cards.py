@@ -50,10 +50,12 @@ LB_CARD_H = 596.0
 CENTER_CLEAR_FRAC = 0.40
 
 # catch judgment palette (0..1) — matches hud.draw_results' Fruit/Drop/Droplet/Miss
+# (DROPLET = the perf-panel PP-bar light blue, not gray, so every judgment has a
+# real colour — 2026-07-22 polish)
 RESULT_COLORS = {
     "FRUIT":   (255 / 255, 230 / 255, 120 / 255),
     "DROP":    (140 / 255, 220 / 255, 140 / 255),
-    "DROPLET": (180 / 255, 180 / 255, 180 / 255),
+    "DROPLET": (153 / 255, 219 / 255, 255 / 255),
     "MISS":    (240 / 255,  80 / 255,  80 / 255),
 }
 
@@ -91,6 +93,21 @@ def _hsv(h: float, s: float, v: float) -> tuple[float, float, float]:
 def _clip(s: str, n: int) -> str:
     s = s or ""
     return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _clip_words(s: str, n: int) -> str:
+    """Ellipsize on a WORD boundary: the whole string when it fits, else cut at
+    the last word break that fits (mid-word only for one giant unbroken word),
+    dropping any dangling separator before the '…' (2026-07-22 polish — the
+    banner used to chop titles mid-word: 'Shooti…')."""
+    s = s or ""
+    if len(s) <= n:
+        return s
+    cut = s[:n - 1].rstrip()
+    sp = cut.rfind(" ")
+    if sp >= max(8, (n - 1) // 3):
+        cut = cut[:sp]
+    return cut.rstrip(" -–—·:|(") + "…"
 
 
 def _name_hash(name: str) -> int:
@@ -242,6 +259,16 @@ def bake_lb_card(entry, avatar_bytes, W_px: int, H_px: int, k: float,
               (0.96, 0.97, 1.0), "m")
     y += int(32 * k)
     lx, rx = pad, W - pad
+    # vertically BALANCE the stats block: centre the judgment/combo/acc/mods
+    # block in the space between the name and the bottom-anchored score,
+    # instead of leaving one big empty gap above the score (2026-07-22 polish).
+    ms = (entry.mods_str or "").strip()
+    has_mods = bool(ms and ms.upper() != "NM")
+    block_h = 4 * int(23 * k) + int(8 * k) + int(23 * k) + int(30 * k)
+    if has_mods:
+        block_h += int(22 * k)
+    slack = (H - int(84 * k)) - y - block_h
+    y += max(0, int(slack * 0.5))
     # catch judgment rows — Miss folds in count_katu (missed droplets), exactly
     # as catch's featured results card counts it.
     miss = int(entry.counts[3]) + int(getattr(entry, "count_katu", 0) or 0)
@@ -259,9 +286,9 @@ def bake_lb_card(entry, avatar_bytes, W_px: int, H_px: int, k: float,
     _pil_text(d, font(15), "Accuracy", lx, y, (0.62, 0.66, 0.76), "l")
     _pil_text(d, font(15), f"{entry.accuracy:.2f}%", rx, y, (0.96, 0.86, 0.42), "r")
     y += int(30 * k)
-    # mods badges (small pills) — reuse the .osr mods string
-    ms = (entry.mods_str or "").strip()
-    if ms and ms.upper() != "NM":
+    # mods badges (small pills) — reuse the .osr mods string (hoisted above
+    # for the block-height measure)
+    if has_mods:
         mods = [m for m in ms.split(",") if m][:5]
         mf = font(13)
         pill_h = int(22 * k)
@@ -425,7 +452,7 @@ def bake_board(board, W: int, H: int, title: str, *,
 def _bake_banner(board, title, scale, W, H):
     """'#RANK on <map>' + the NEW #1 / NEW BEST pill, centred along the top edge
     (above catch's grade letter, so it never collides with the stack)."""
-    rank_txt = f"#{board.rank} on {_clip(title, 30)}"
+    rank_txt = f"#{board.rank} on {_clip_words(title, 48)}"
     f = _load_font(max(int(26 * scale), 13))
     try:
         bx0, by0, bx1, by1 = f.getbbox(rank_txt)

@@ -30,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--encoder-device", default=None, help="e.g. /dev/dri/renderD128")
     ap.add_argument("--skin", type=Path, default=None, help="extracted skin dir (e.g. Night05)")
     ap.add_argument("--default-skin", type=Path, default=None, help="fallback skin dir")
+    ap.add_argument("--overlay-osr", action="append", type=Path, default=[],
+                    help="extra replay(s) for a versus OVERLAY (repeatable)")
+    ap.add_argument("--catcher-skin", action="append", type=str, default=[],
+                    help="per-player catcher skin dir; order = primary then "
+                         "--overlay-osr; '-' or omitted = base skin (repeatable)")
     BA = argparse.BooleanOptionalAction
     ap.add_argument("--skip-intro", action=BA, default=True, help="start at first object")
     ap.add_argument("--results", action=BA, default=True, help="results-screen outro")
@@ -136,7 +141,9 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     out = render_catch(args.osr, args.beatmap_dir, args.output, cfg,
-                       progress_callback=progress)
+                       progress_callback=progress,
+                       overlay_osr=args.overlay_osr or None,
+                       catcher_skins=args.catcher_skin or None)
     print(f"\nwrote {out}", file=sys.stderr)
     return 0
 

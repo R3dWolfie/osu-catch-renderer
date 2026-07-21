@@ -101,9 +101,22 @@ def render_catch(
     cfg: RenderConfig | None = None,
     *,
     progress_callback=None,
+    overlay_osr=None,
+    catcher_skins=None,
 ) -> Path:
+    """Render `osr_path` over the beatmap in `beatmap_dir`. `overlay_osr` (a list
+    of extra .osr paths) turns it into a versus OVERLAY: all replays race the
+    same fruit stream on one field, catchers colour-coded per player.
+    `catcher_skins` (aligned to [primary] + overlay_osr) gives each player their
+    OWN skin's catcher; entries that are falsy/'-' fall back to the base skin."""
     cfg = cfg or RenderConfig()
     frames, meta = parse_replay(osr_path)
+    overlay_extra = None
+    if overlay_osr:
+        overlay_extra = []
+        for extra in overlay_osr:
+            efr, emt = parse_replay(Path(extra))
+            overlay_extra.append((efr, emt, getattr(emt, "player_name", "P")))
     osu_path = _find_osu(beatmap_dir, meta.beatmap_md5)
     bm = parse_beatmap(osu_path, mods=meta.mods)
     if not bm.objects:
@@ -120,7 +133,8 @@ def render_catch(
         replay_md5 = ""
     return render_core(bm, frames, meta, output_path, cfg, audio=audio, bg=bg,
                        progress_callback=progress_callback, osu_path=osu_path,
-                       replay_md5=replay_md5)
+                       replay_md5=replay_md5, overlay_extra=overlay_extra,
+                       catcher_skins=catcher_skins)
 
 
 def render_core(
@@ -135,9 +149,19 @@ def render_core(
     progress_callback=None,
     osu_path: Path | None = None,
     replay_md5: str = "",
+    overlay_extra=None,
+    catcher_skins=None,
 ) -> Path:
     """Render from already-parsed beatmap/frames/meta. Shared by the osr path
-    and tests."""
+    and tests.
+
+    `overlay_extra` (list of (frames, meta, name)) turns this into a VERSUS
+    OVERLAY: the primary player (frames/meta) plus these extra players' replays
+    race the SAME fruit stream on one field. Each catcher is grayscaled +
+    colour-coded per player. `catcher_skins` (aligned to [primary]+overlay_extra)
+    gives each player their OWN skin's catcher; falsy/'-' → base skin catcher.
+    The base playfield/fruits/HUD come from the base skin (`cfg.skin_dir`).
+    Single renders leave overlay_extra None."""
     from .fonts import set_skin_font
     # prefer a font bundled in the skin, else a robust system font (must run
     # before the HUD builds its glyph/text fonts below).
@@ -157,6 +181,45 @@ def render_core(
     sim_end_ms = int(death_ms) if failed else None
     sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None,
                    meta=meta, end_ms=sim_end_ms)
+    _overlay_gray_keys = set()
+    _player_catcher_bakes = []      # [(texture_key, rgba)] grayscaled + uploaded below
+    if overlay_extra:
+        from .overlay import CatchOverlaySim
+        from .skin import CatchSkin
+        extra_sims = [CatchSim(bm, fr, cfg, skin=skin, has_bg=bg is not None,
+                               meta=mt, end_ms=None)
+                      for (fr, mt, _n) in overlay_extra]
+        # BASE skin fruit sprites (incl. the base catcher) get a grayscale "__ovl"
+        # copy so the caught fruits + any base/unlinked catcher recolour cleanly.
+        _overlay_gray_keys = {k for k in (skin.textures if skin else ())
+                              if isinstance(k, str) and k.startswith("fruit")}
+        # PER-PLAYER catcher: each player's OWN skin's catcher, grayscaled to its
+        # own key; players without a linked skin (or whose skin has no catcher)
+        # fall back to the base catcher gray. `catcher_skins` aligns to
+        # [primary] + overlay_extra.
+        catcher_keys = []
+        for i in range(1 + len(overlay_extra)):
+            sd = (catcher_skins[i] if catcher_skins and i < len(catcher_skins)
+                  else None)
+            sd = str(sd) if sd and str(sd) not in ("", "-") else None
+            ctex = None
+            if sd and Path(sd).is_dir():
+                try:
+                    ctex = CatchSkin(Path(sd), cfg.default_skin_dir) \
+                        .textures.get("fruit-catcher-idle")
+                except Exception:      # noqa: BLE001 — bad skin → base catcher
+                    ctex = None
+            if ctex is not None:
+                key = f"fruit-catcher-idle__ovl_c{i}"
+                _player_catcher_bakes.append((key, ctex))
+                catcher_keys.append(key)
+            else:
+                catcher_keys.append("fruit-catcher-idle__ovl")
+        sim = CatchOverlaySim(
+            [sim] + extra_sims,
+            [getattr(meta, "player_name", "P1")]
+            + [n for (_f, _m, n) in overlay_extra],
+            gray_keys=_overlay_gray_keys, catcher_keys=catcher_keys)
     if cfg.show_pp_counter and osu_path is not None:
         sim.compute_pp_curve(osu_path, meta.mods)
     preempt = ar_to_preempt_ms(bm.ar)
@@ -200,6 +263,17 @@ def render_core(
     else:
         for key, rgba in build_textures().items():
             renderer.upload_texture(key, rgba)
+    # OVERLAY: grayscale every base skin fruit sprite (std _whiten_skin_cursor
+    # method) so the caught fruits recolour cleanly by a colour multiply — keeps
+    # the shape, drops the hue. Plus each player's OWN catcher (its own key).
+    def _gray(rgba):
+        r = np.asarray(rgba).astype(np.float32)
+        lum = 0.299 * r[..., 0] + 0.587 * r[..., 1] + 0.114 * r[..., 2]
+        return np.clip(np.stack([lum, lum, lum, r[..., 3]], axis=-1), 0, 255).astype(np.uint8)
+    for key in _overlay_gray_keys:
+        renderer.upload_texture(f"{key}__ovl", _gray(skin.textures[key]))
+    for key, ctex in _player_catcher_bakes:
+        renderer.upload_texture(key, _gray(ctex))
     # osu!lazer ARGON catch objects (glowing wavy combo rings + white pip) and
     # the Argon catcher bar — uploaded regardless of skin: the skinless object
     # path, the caught-fruit plate pile, and the hit explosions all use them.
@@ -222,7 +296,8 @@ def render_core(
     # DanserHud fails to build.
     try:
         from .hud import DanserHud
-        hud = DanserHud(cfg.skin_dir, cfg.resolution, meta, bm, first, last, cfg=cfg)
+        hud = DanserHud(cfg.skin_dir, cfg.resolution, meta, bm, first, last, cfg=cfg,
+                        default_skin_dir=cfg.default_skin_dir)
     except Exception:
         hud = _Hud(w, h, meta, bm)
 

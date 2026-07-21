@@ -222,15 +222,18 @@ def catcher_x_at(frames: list[CatchFrame], t_ms: int) -> tuple[float, bool]:
 
 
 def _grade(acc: float, r) -> str:
-    miss = int(r.count_miss)
+    # osu!catch rank is accuracy-ONLY, inclusive cutoffs (CatchScoreProcessor
+    # RankFromScore): SS=100%, S>=98, A>=94, B>=90, C>=85, else D. There is NO
+    # zero-miss requirement for S in catch (unlike std) — the old `miss == 0`
+    # gate + strict `>` here mis-graded 1-miss ≥98% plays and exact boundaries.
     if acc >= 1.0:
         return "SS"
-    if acc > 0.98 and miss == 0:
+    if acc >= 0.98:
         return "S"
-    if acc > 0.94:
+    if acc >= 0.94:
         return "A"
-    if acc > 0.90:
+    if acc >= 0.90:
         return "B"
-    if acc > 0.85:
+    if acc >= 0.85:
         return "C"
     return "D"

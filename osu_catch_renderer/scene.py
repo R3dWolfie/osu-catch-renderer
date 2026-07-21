@@ -45,6 +45,35 @@ class _Checkpoint:
     pp: float = 0.0
 
 
+# osu!CATCH mod-score multipliers — from lazer's CatchScoreMultiplierCalculator
+# (NOT the std/taiko table; catch values differ). EZ/NF 0.5, HD 1.06, HR 1.12,
+# DT/NC 1.1 (rateAdjust 1+(1.5-1)/5), HT 0.3, FL 1.12, RX 0.1. Catch has NO
+# Spun Out. Applied to the standardised 1,000,000 total.
+_MOD_SCORE_MULT = {1 << 0: 0.5,   # NF
+                   1 << 1: 0.5,   # EZ
+                   1 << 3: 1.06,  # HD
+                   1 << 4: 1.12,  # HR
+                   1 << 6: 1.1,   # DT
+                   1 << 7: 0.1,   # RX (Relax)
+                   1 << 8: 0.3,   # HT
+                   1 << 9: 1.1,   # NC
+                   1 << 10: 1.12} # FL
+
+
+def mods_score_multiplier(mods: int) -> float:
+    mods = int(mods or 0)
+    # NC (Nightcore) is stored as DT|NC (bits 64|512); the speed change is ONE
+    # score multiplier, so drop the implied DT bit or it squares (1.23²=1.51,
+    # pushing scores past the 1e6 max). Same for DC=HT|DC if ever present.
+    if mods & (1 << 9):        # NC set → clear implied DT
+        mods &= ~(1 << 6)
+    m = 1.0
+    for bit, mult in _MOD_SCORE_MULT.items():
+        if mods & bit:
+            m *= mult
+    return m
+
+
 class CatchSim:
     def __init__(self, beatmap: CatchBeatmap, frames: list[CatchFrame], cfg: RenderConfig,
                  skin=None, has_bg: bool = False, meta=None,
@@ -54,6 +83,10 @@ class CatchSim:
         self.cfg = cfg
         self.skin = skin
         self.meta = meta
+        # Overlay/versus mode forces the white Argon catcher so a per-player
+        # colour tint reads cleanly (tinting a skin's already-coloured catcher
+        # muddies it). Single renders leave this False = skin catcher as usual.
+        self.force_argon_catcher = False
         # On a failed play, gameplay stops at the death time. Objects past
         # it were never reached, so they're excluded from BOTH the catch
         # simulation (otherwise the count-reconcile spreads the played
@@ -110,6 +143,12 @@ class CatchSim:
         self._caught: list[bool] = []
         self._checkpoints: list[_Checkpoint] = []
         self._catches: list = []   # (time, x, combo_index, hyper, combo)
+        # Plate pile (lazer computePositionInStack): per caught fruit, a mutable
+        # [catch_time, offset_x, offset_y (osu units, ride the catcher),
+        #  combo_index, hyper, clear_time, anim] — clear_time/anim filled by the
+        # post-sim group pass ("explode" if the combo's last object was hit,
+        # else "drop").
+        self._plate: list = []
         self._hyper_windows: list[tuple[int, int]] = []    # catcher glows red in these
         self._calibrate_offset()
         self._simulate()
@@ -211,30 +250,101 @@ class CatchSim:
             _reconcile(ObjType.DROPLET, m.count_100)
             _reconcile(ObjType.TINY_DROPLET, m.count_50)
 
-        # --- pass 2: combo / score / hp / acc / counts from reconciled catches ---
+        # --- pass 2: lazer-standardised ScoreV3 from reconciled catches ------
+        # Base numerics per catch judgement: Fruit=Great=300, Droplet=
+        # LargeTick=30 (both AFFECT COMBO + accuracy), TinyDroplet=SmallTick=10
+        # (accuracy only, NO combo). combo_portion += base·√combo — the
+        # power-based curve of the current lazer ScoreProcessor, NOT the old
+        # log-based ScoreV2 the renderer used to scale to meta.score. The
+        # 500k combo / 500k accuracy split is then ×mod-multiplier.
+        # NOTE: banana-shower bonus (LargeBonus +50 each) is not modelled —
+        # there are no Banana objects in the sim, so score is a hair low on
+        # banana maps. Fine for ranking; flagged for exactness.
+        _BASE = {ObjType.FRUIT: 300.0, ObjType.DROPLET: 30.0,
+                 ObjType.TINY_DROPLET: 10.0}
+        _combo_kinds = (ObjType.FRUIT, ObjType.DROPLET)
+        max_combo_portion = 0.0
+        max_base_total = 0.0
+        _pc = 0
+        for obj in objs:
+            max_base_total += _BASE.get(obj.kind, 0.0)
+            if obj.kind in _combo_kinds:
+                _pc += 1
+                max_combo_portion += _BASE[obj.kind] * (_pc ** 0.5)
+        _mod_mult = mods_score_multiplier(getattr(self.meta, "mods", 0) or 0)
+
         combo = max_combo = 0
         hp = 1.0
         c300 = c100 = c50 = ckatu = cmiss = ctiny_miss = 0
         combo_portion = 0.0
+        cur_base = cur_max_base = 0.0
         pending_hyper: int | None = None
+        pending_target: float | None = None
+        import random as _random
+        _pile_ci = -1                          # current combo group for the pile
+        _pile_placed: list = []                # (offset_x, offset_y) already placed
+        _pile_adj = 128.0 * self.obj_scale * (10.0 / 64.0)   # jitter radius, osu units
         for obj, caught in zip(objs, self._caught):
+            cur_max_base += _BASE.get(obj.kind, 0.0)
             if obj.kind in (ObjType.FRUIT, ObjType.DROPLET):
+                base = _BASE[obj.kind]
                 if pending_hyper is not None:
-                    self._hyper_windows.append((pending_hyper, obj.time_ms))
+                    # lazer ends the hyperdash the INSTANT the catcher reaches the
+                    # target x (SetHyperDashState clears on arrival), NOT at the
+                    # next object — otherwise the catcher sits solid-red and
+                    # stationary for the whole gap (the "bright red glow" bug).
+                    # Scan the replay path forward for arrival, capped at the next
+                    # object's time.
+                    end = obj.time_ms
+                    if pending_target is not None:
+                        th = pending_hyper
+                        while th < obj.time_ms:
+                            cxh, _ = catcher_x_at(self.frames, th)
+                            if abs(cxh - pending_target) <= self.half:
+                                end = th
+                                break
+                            th += 16
+                    self._hyper_windows.append((pending_hyper, end))
                     pending_hyper = None
+                    pending_target = None
                 if caught:
                     combo += 1
                     max_combo = max(max_combo, combo)
-                    combo_portion += 300.0 * min(max(0.5,
-                        math.log(combo, self._COMBO_BASE)), log_cap)
+                    combo_portion += base * (combo ** 0.5)
+                    cur_base += base
                     hp = min(1.0, hp + 0.025)
                     if obj.kind is ObjType.FRUIT:
                         c300 += 1
                         self._catches.append((obj.time_ms, obj.x, obj.combo_index, obj.hyperdash, combo))
+                        # lazer computePositionInStack: land at where it was caught
+                        # (offset from plate centre), then jitter ONLY to de-overlap
+                        # against fruit already on the plate this combo.
+                        if obj.combo_index != _pile_ci:
+                            _pile_ci = obj.combo_index
+                            _pile_placed = []
+                        cxh, _ = catcher_x_at(self.frames, obj.time_ms)
+                        # Cluster toward the catcher centre (0.55) instead of the
+                        # full caught-offset, so the pile stacks UP rather than
+                        # smearing across the whole bar width (Red: "stack on top
+                        # of each other", not a diagonal chain).
+                        px = (obj.x - cxh) * 0.55
+                        py = 0.0
+                        chk = _pile_adj * _pile_adj
+                        rng = _random.Random(int(obj.time_ms))
+                        _g = 0
+                        while _g < 64 and any((px - fx) ** 2 + (py - fy) ** 2 < chk
+                                              for fx, fy in _pile_placed):
+                            px += rng.uniform(-_pile_adj * 0.45, _pile_adj * 0.45)
+                            py -= rng.uniform(3.0, 7.0)     # build the tower UPWARD
+                            _g += 1
+                        _pile_placed.append((px, py))
+                        self._plate.append([obj.time_ms, px, py, obj.combo_index,
+                                            obj.hyperdash, None, None])
                     else:
                         c100 += 1
                     if obj.hyperdash:
                         pending_hyper = obj.time_ms
+                        pending_target = obj.hyper_target_x
                 else:
                     combo = 0
                     hp = max(0.0, hp - 0.10)
@@ -245,23 +355,43 @@ class CatchSim:
             elif obj.kind is ObjType.TINY_DROPLET:
                 if caught:
                     c50 += 1
-                    combo_portion += 30.0
+                    cur_base += _BASE[ObjType.TINY_DROPLET]
                 else:
                     ctiny_miss += 1
+            # lazer standardised: 500k·acc·comboRatio + 500k·acc⁵·progress ×mult
+            if max_combo_portion > 0 and max_base_total > 0 and cur_max_base > 0:
+                sacc = cur_base / cur_max_base
+                score = (500_000.0 * sacc * (combo_portion / max_combo_portion)
+                         + 500_000.0 * (sacc ** 5) * (cur_max_base / max_base_total)
+                         ) * _mod_mult
+            else:
+                score = 0.0
             caught_acc = c300 + c100 + c50
             total_acc = caught_acc + cmiss + ckatu + ctiny_miss
             acc = (caught_acc / total_acc) if total_acc else 1.0
             self._checkpoints.append(
-                _Checkpoint(obj.time_ms, combo, int(combo_portion), hp, acc, max_combo,
+                _Checkpoint(obj.time_ms, combo, int(round(score)), hp, acc, max_combo,
                             counts=(c300, c100, c50, ctiny_miss, cmiss + ckatu)))
+
+        # Plate clear points: at each combo's LAST object (lazer LastInCombo) the
+        # pile Explodes (that object was HIT) or Drops (missed) — Catcher.cs.
+        group_last: dict = {}
+        for o, c in zip(self._objs, self._caught):
+            ci = o.combo_index
+            if ci not in group_last or o.time_ms >= group_last[ci][0]:
+                group_last[ci] = (o.time_ms, c)
+        for rec in self._plate:
+            gt, gc = group_last.get(rec[3], (rec[0], True))
+            rec[5] = max(gt, rec[0])                    # clear_time (>= catch time)
+            rec[6] = "explode" if gc else "drop"
 
         # osu!catch legacy counts: 300=caught fruit, 100=caught large droplet,
         # 50=caught tiny droplet, katu=MISSED tiny, miss=missed fruit + large.
         self.final_counts = (c300, c100, c50, ctiny_miss, cmiss + ckatu)
         self.final_accuracy = acc if self._checkpoints else 1.0
-        # anchor the displayed score curve to the replay's real final score
-        if self.meta is not None and combo_portion > 0 and self.meta.score > 0:
-            self.score_scale = self.meta.score / combo_portion
+        # score curve is already the absolute lazer-standardised ScoreV3 —
+        # no post-hoc scale to the replay's mixed-format total.
+        self.score_scale = 1.0
         # anchor accuracy to the replay's authoritative final (tiny-droplet
         # positions can't be reproduced bit-exact, so trust the replay's counts)
         m = self.meta
@@ -292,6 +422,23 @@ class CatchSim:
     def _sx(self, osu_x: float) -> float:
         return self.x_off + osu_x * self.unit_px
 
+    def _hyper_amount(self, t_ms) -> float:
+        """Catcher red-tint strength 0..1 with lazer's 180ms OutQuint fade in at
+        hyper start and fade out at hyper end (HYPER_DASH_TRANSITION_DURATION).
+        0 outside a hyper window + its 180ms fade-out tail."""
+        if not self.cfg.show_hyperdash:
+            return 0.0
+        D = 180.0
+        amt = 0.0
+        for a, b in self._hyper_windows:
+            if a <= t_ms <= b:
+                u = min((t_ms - a) / D, 1.0)
+                amt = max(amt, 1.0 - (1.0 - u) ** 5)     # OutQuint fade-IN white->red
+            elif b < t_ms <= b + D:
+                u = (t_ms - b) / D
+                amt = max(amt, (1.0 - u) ** 5)           # fade-OUT red->white
+        return amt
+
     def _fruit_y(self, obj_time: int, t: int) -> float:
         f = (t - (obj_time - self.preempt)) / self.preempt
         return -self.fruit_screen + (self.plane_y + self.fruit_screen) * f
@@ -313,28 +460,47 @@ class CatchSim:
                                     self.screen_w, self.screen_h,
                                     texture_key="bg", color=(d, d, d, 1.0)))
 
-        # falling objects within their approach window (and not yet caught/past)
+        # falling objects. Caught objects vanish at the catch line; MISSED ones
+        # keep FALLING THROUGH the catcher for 250 ms while fading out and
+        # rotating to 2× their tilt — lazer's DrawableCatchHitObject miss
+        # (FadeOut(250).RotateTo(Rotation*2, 250, Easing.Out)). Blinking out at
+        # the plate was the single biggest "not osu" tell on drops.
         for obj, caught in zip(self._objs, self._caught):
-            if obj.time_ms - self.preempt <= t_ms <= obj.time_ms:
-                y = self._fruit_y(obj.time_ms, t_ms)
-                sprites = self._object_sprites(obj, self._sx(obj.x), y, t_ms)
-                if self.hidden:
-                    a = self._hd_alpha(obj.time_ms, t_ms)
-                    if a < 1.0:
-                        for sp in sprites:
-                            r, g, b, al = sp.color
-                            sp.color = (r, g, b, al * a)
-                s.sprites.extend(sprites)
+            end = obj.time_ms if caught else obj.time_ms + 250
+            if not (obj.time_ms - self.preempt <= t_ms <= end):
+                continue
+            y = self._fruit_y(obj.time_ms, t_ms)
+            sprites = self._object_sprites(obj, self._sx(obj.x), y, t_ms)
+            if not caught and t_ms > obj.time_ms:
+                mu = (t_ms - obj.time_ms) / 250.0            # 0..1 through the miss
+                for sp in sprites:
+                    r, g, b, al = sp.color
+                    sp.color = (r, g, b, al * max(0.0, 1.0 - mu))
+                    sp.rotation = sp.rotation * (1.0 + mu)   # tilt → 2× over 250ms
+            elif self.hidden:
+                a = self._hd_alpha(obj.time_ms, t_ms)
+                if a < 1.0:
+                    for sp in sprites:
+                        r, g, b, al = sp.color
+                        sp.color = (r, g, b, al * a)
+            s.sprites.extend(sprites)
 
         # catcher (+ dash trail + caught-fruit pile riding on the plate)
         cx, dashing = catcher_x_at(self.frames, t_ms)
         s.catcher_x = float(cx)          # HUD key counter (L/R from x delta)
         s.dashing = bool(dashing)        # HUD key counter (dash key state)
         scx = self._sx(cx)
-        hyper = self.cfg.show_hyperdash and any(a <= t_ms <= b for a, b in self._hyper_windows)
-        if self.cfg.catcher_dash_trail and (dashing or hyper):
-            s.sprites.extend(self._dash_trail(t_ms, hyper))
-        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper, t_ms))
+        # Red-tint strength 0..1 with lazer's 180ms OutQuint fade in/out, so the
+        # catcher/trail ramp white<->red instead of snapping to pure red.
+        hyper_amt = self._hyper_amount(t_ms)
+        hyper = hyper_amt > 0.0
+        # Always build the trail when enabled — _dash_trail keys each ghost off
+        # whether the catcher was dashing at that PAST instant, so trailing
+        # ghosts persist and fade smoothly after a dash ends (and through the
+        # hyperdash after-image window) instead of strobing with the live flag.
+        if self.cfg.catcher_dash_trail:
+            s.sprites.extend(self._dash_trail(t_ms, hyper_amt))
+        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper_amt, t_ms))
         s.sprites.extend(self._plate_stack(scx, t_ms))
         s.sprites.extend(self._catch_explosions(t_ms))
 
@@ -582,30 +748,64 @@ class CatchSim:
             out.append(Sprite(x, y, size, size, texture_key=ov, color=(1, 1, 1, 1), rotation=rot))
         return out
 
-    def _dash_trail(self, t_ms, hyper) -> list[Sprite]:
-        """Faded catcher afterimages at recent positions while dashing."""
-        out: list[Sprite] = []
+    def _catcher_ghost(self, scx, rgb, alpha, scale=1.0, dy=0.0) -> list[Sprite]:
+        """One ADDITIVE afterimage of the FULL catcher body (skin sprite, or the
+        Argon bar+bumpers) at screen-x scx — the unit lazer's CatcherTrail draws
+        (CatcherTrail.body = SkinnableCatcher, Blending = Additive)."""
         if self.skin is not None and self.skin.has("fruit-catcher-idle"):
-            w = self.catcher_w
-            h = w * self.skin.catcher_aspect
-            base = (1.0, 0.4, 0.4) if hyper else (0.8, 0.85, 1.0)
-            for k, dt in enumerate((26, 52, 80)):
-                px, _ = catcher_x_at(self.frames, t_ms - dt)
-                alpha = 0.32 * (1.0 - k / 3.0)
-                out.append(Sprite(self._sx(px), self.plane_y + h * 0.46, w, h,
-                                  texture_key="fruit-catcher-idle",
-                                  color=(*base, alpha)))
-            return out
-        # Argon catcher trail: faint afterimages of the white catch bar at
-        # recent positions (red-tinted while hyperdashing).
+            hb = self.catcher_w * self.skin.catcher_aspect
+            return [Sprite(scx, self.plane_y + hb * 0.46 + dy,
+                           self.catcher_w * scale, hb * scale,
+                           texture_key="fruit-catcher-idle",
+                           color=(*rgb, alpha), additive=True)]
         from .lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
-        base = (1.0, 0.6, 0.6) if hyper else (0.8, 0.9, 1.0)
-        for k, dt in enumerate((26, 52, 80)):
-            px, _ = catcher_x_at(self.frames, t_ms - dt)
-            alpha = 0.28 * (1.0 - k / 3.0)
-            out.append(Sprite(self._sx(px), g["cy"], g["bar_w"], g["bar_h"],
-                              texture_key="argon_bar_cap", color=(*base, alpha)))
+        cy = g["cy"] + dy
+        bx = (g["bar_w"] * 0.5 + g["bump_w"] * 0.5) * scale
+        return [
+            Sprite(scx, cy, g["bar_w"] * scale, g["bar_h"] * scale,
+                   texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
+            Sprite(scx - bx, cy, g["bump_w"] * scale, g["bump_h"] * scale,
+                   texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
+            Sprite(scx + bx, cy, g["bump_w"] * scale, g["bump_h"] * scale,
+                   texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
+        ]
+
+    def _dash_trail(self, t_ms, hyper_amt) -> list[Sprite]:
+        """osu!lazer CatcherTrailDisplay. A dense ADDITIVE stack of full-catcher
+        afterimages over the last 800 ms while dashing/hyperdashing — one every
+        16 ms (CatcherArea trail_generation_interval), alpha 0.4·(1-age/800)^5
+        (CatcherTrail FadeTo(0.4)→FadeOut(800, OutQuint)), lerped white->red by
+        hyper_amt — PLUS the hyperdash after-image burst at each hyper onset
+        (grows 0.95→1.2×, drifts up 10 px, fades over 1200 ms). Replaces the old
+        3-ghost/80 ms non-additive trail that was ~50× too sparse to see."""
+        out: list[Sprite] = []
+        trail_rgb = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt)
+        for age in range(16, 801, 16):
+            alpha = 0.4 * (1.0 - age / 800.0) ** 5
+            if alpha < 0.004:
+                break                       # monotonic → no later age is brighter
+            px, was_dashing = catcher_x_at(self.frames, t_ms - age)
+            # Key each ghost off whether the catcher was dashing at THAT past
+            # instant — NOT the live frame's dash bit. The replay's dash flag
+            # flickers on/off frame-to-frame near dash edges; gating the whole
+            # trail on the live flag made all 30 ghosts strobe together (the
+            # "jittery" bug). Per-instant keying = ghosts fade out smoothly.
+            if was_dashing:
+                out.extend(self._catcher_ghost(self._sx(px), trail_rgb, alpha))
+        # Hyperdash after-image: one red ghost per hyper onset (Easing.In pop).
+        for h_start, _h_end in self._hyper_windows:
+            age = t_ms - h_start
+            if 0.0 <= age <= 1200.0:
+                u = age / 1200.0
+                e = u * u                   # Easing.In ≈ quadratic
+                alpha = 1.0 - u
+                if alpha < 0.004:
+                    continue
+                px, _ = catcher_x_at(self.frames, h_start)
+                out.extend(self._catcher_ghost(
+                    self._sx(px), (1.0, 0.0, 0.0), alpha,
+                    scale=0.95 + 0.25 * e, dy=-10.0 * self.unit_px * e))
         return out
 
     def _procedural_object(self, obj, x, y) -> Sprite:
@@ -618,17 +818,16 @@ class CatchSim:
         size = self.fruit_screen * (1.3 if obj.hyperdash else 1.0)
         return Sprite(x, y, size, size, texture_key=FRUIT_TEX[obj.combo_index % 4])
 
-    def _catcher_sprites(self, x, dashing, hyper=False, t_ms=None) -> list[Sprite]:
+    def _catcher_sprites(self, x, dashing, hyper_amt=0.0, t_ms=None) -> list[Sprite]:
         # A custom skin's catcher takes priority — same layout (CS/mod-driven
         # catcher_w), the skin supplies the sprite. The procedural Argon catcher
         # is only the base/fallback when the skin ships no catcher.
-        if self.skin is not None and self.skin.has("fruit-catcher-idle"):
-            if hyper:
-                tint = (1.0, 0.45, 0.55, 1.0)
-            elif dashing:
-                tint = (1.0, 0.8, 0.9, 1.0)
-            else:
-                tint = (1, 1, 1, 1)
+        if (self.skin is not None and self.skin.has("fruit-catcher-idle")
+                and not self.force_argon_catcher):
+            # lazer tints the catcher red ONLY when hyperdashing (Catcher
+            # DEFAULT_HYPER_DASH_COLOUR = Color4.Red); plain dashing leaves the
+            # body white — the trail is the dash cue, not a body tint.
+            tint = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 1.0)
             w = self.catcher_w
             h = w * self.skin.catcher_aspect
             return [Sprite(x, self.plane_y + h * 0.46, w, h,
@@ -640,14 +839,10 @@ class CatchSim:
         from .lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
         cy = g["cy"]
-        col = (1.0, 0.5, 0.5, 1.0) if hyper else (1.0, 1.0, 1.0, 1.0)
+        # lazer's ArgonCatcher is white; hyperdash turns it full red (no glow —
+        # the red after-image trail is the hyper cue, drawn in _dash_trail).
+        col = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 1.0)
         out: list[Sprite] = []
-        if hyper:
-            import math
-            pulse = 0.30 + 0.14 * abs(math.sin((t_ms or 0) * 0.012))
-            out.append(Sprite(x, cy, g["full_w"] * 1.1, g["bar_h"] * 6.0,
-                              texture_key="catch_glow",
-                              color=(1.0, 0.24, 0.24, pulse), additive=True))
         # main catch bar
         out.append(Sprite(x, cy, g["bar_w"], g["bar_h"],
                           texture_key="argon_bar_cap", color=col))
@@ -660,7 +855,7 @@ class CatchSim:
         # faint long lines out to the screen edges (alpha 0.25)
         left_outer = x - g["full_w"] * 0.5
         right_outer = x + g["full_w"] * 0.5
-        line_c = (1.0, 0.6, 0.6, 0.25) if hyper else (1.0, 1.0, 1.0, 0.25)
+        line_c = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 0.25)
         if left_outer > 1.0:
             out.append(Sprite(left_outer * 0.5, cy, left_outer, g["line_h"],
                               texture_key=None, color=line_c))
@@ -671,24 +866,67 @@ class CatchSim:
         return out
 
     def _plate_stack(self, scx, t_ms) -> list[Sprite]:
-        """Caught fruit piled on the catcher (Argon blobs + pip), fading out."""
-        STACK_MS = 850
-        plate_half = self.half * self.x_scale
+        """Caught fruit riding the catcher plate — lazer-faithful (Catcher.cs).
+        Each fruit lands at the x it was caught (computePositionInStack offset,
+        precomputed in the sim), rides the plate, PERSISTS through the whole
+        combo, then at the combo's last object either EXPLODES outward (that
+        object was hit: MoveX +offset·6 linear over 1s, Y bounce -50 OutSine /
+        +100 InSine, FadeOut 750) or DROPS off (missed: +75 InSine, FadeOut 750).
+        Skin fruit sprite at 0.5× object; Argon fallback when skinless."""
+        import math
         out: list[Sprite] = []
-        recent = [c for c in self._catches if 0 <= t_ms - c[0] <= STACK_MS][-12:]
-        for ct, cx, ci, hy, cmb in recent:
-            alpha = 1.0 - (t_ms - ct) / STACK_MS
-            ox = (((ct * 131) % 100) / 100 - 0.5) * plate_half * 1.4
-            oy = -(((ct * 73) % 4)) * self.fruit_screen * 0.10
-            d = self.fruit_screen * 0.50 * ARGON_CANVAS
+        up = self.unit_px
+        # Caught fruit pile ABOVE the catcher — lazer anchors the caught container
+        # to the catcher's TopCentre, so the pile rests ON the catch line and
+        # builds UPWARD (in front of the bar). Was `+0.1` = BELOW the line, which
+        # sank the base fruits behind the bar (Red's flag).
+        base_y = self.plane_y - self.fruit_screen * 0.34
+        size = self.fruit_screen * 0.5
+        for ct, ox, oy, ci, hy, clear_t, anim in self._plate:
+            if clear_t is None or t_ms < ct:
+                continue
             v = int(ct // 7) % ARGON_VARIANTS
-            tint = self._combo_tint(ci)
-            py = self.plane_y + self.fruit_screen * 0.15 + oy
-            out.append(Sprite(scx + ox, py, d, d, texture_key="argon_pip",
-                              color=(1, 1, 1, alpha)))
-            out.append(Sprite(scx + ox, py, d, d, texture_key=f"argon_fruit_{v}",
-                              color=(tint[0], tint[1], tint[2], alpha), additive=True))
+            if t_ms < clear_t:
+                # ON PLATE — rides the catcher at its stacked position.
+                out.extend(self._plate_fruit(scx + ox * up, base_y + oy * up,
+                                             size, ci, v, 1.0))
+                continue
+            age = t_ms - clear_t
+            if age > 750.0:                                  # gone (FadeOut 750)
+                continue
+            alpha = 1.0 - age / 750.0
+            # World-space: leaves the catcher from its last on-plate position.
+            x0 = self._sx(catcher_x_at(self.frames, int(clear_t))[0]) + ox * up
+            y0 = base_y + oy * up
+            if anim == "drop":                               # miss: fall + fade
+                u = min(age, 750.0) / 750.0
+                sx = x0
+                sy = y0 + 75.0 * up * (1.0 - math.cos(u * math.pi / 2.0))   # InSine
+            else:                                            # hit: burst outward
+                sx = x0 + (ox * 6.0) * up * (min(age, 1000.0) / 1000.0)     # linear
+                if age <= 250.0:
+                    sy = y0 - 50.0 * up * math.sin((age / 250.0) * math.pi / 2.0)   # OutSine
+                else:
+                    u = min(1.0, (age - 250.0) / 500.0)
+                    sy = (y0 - 50.0 * up) + 100.0 * up * (1.0 - math.cos(u * math.pi / 2.0))  # InSine
+            out.extend(self._plate_fruit(sx, sy, size, ci, v, alpha))
         return out
+
+    def _plate_fruit(self, x, y, size, ci, v, alpha) -> list[Sprite]:
+        """One caught fruit — the skin's fruit sprite (base+overlay) if present,
+        else the Argon blob+pip — drawn at `alpha`."""
+        sk = self.skin
+        tint = self._combo_tint(ci)
+        if sk is not None and sk.has(sk.fruit_key(ci)):
+            sprites = self._base_overlay(sk.fruit_key(ci), x, y, size, tint)
+            for sp in sprites:
+                r, g, b, al = sp.color
+                sp.color = (r, g, b, al * alpha)
+            return sprites
+        d = size * ARGON_CANVAS
+        return [Sprite(x, y, d, d, texture_key="argon_pip", color=(1, 1, 1, alpha)),
+                Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
+                       color=(*tint, alpha), additive=True)]
 
     def _catch_explosions(self, t_ms) -> list[Sprite]:
         """osu!lazer ArgonHitExplosion: every caught FRUIT fires a tall,
@@ -696,6 +934,15 @@ class CatchSim:
         (OutQuint) then retracts to (1.1, 1) over 600ms (In), plus a large faint
         glow (radius 50, colour 20% toward white). The whole thing fades out
         over 400ms. s = clamp(combo/200, 0.35, 1.125). Droplets don't explode."""
+        # SKIN HONORING: this is an ARGON element. A legacy skin (one that ships
+        # its own fruit / catcher art) has no such effect — stable just stacks the
+        # caught fruit on the plate — so firing it over a custom skin paints a
+        # glow the skin doesn't have. Skip it entirely for skinned renders;
+        # skinless stays fully Argon.
+        sk = self.skin
+        if sk is not None and (sk.has(sk.fruit_key(0))
+                               or sk.has("fruit-catcher-idle")):
+            return []
         cts = getattr(self, "_catch_times", None)
         if cts is None:
             cts = self._catch_times = [c[0] for c in self._catches]

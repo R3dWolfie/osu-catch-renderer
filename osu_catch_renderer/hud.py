@@ -21,9 +21,27 @@ _MODS = [
 ]
 
 
+class _CatchHud:
+    """HudData-shaped adapter over a CatchSim for the std versus-merge
+    `MergeBoard`: exposes `score_at(t)` (the sim's standardised ScoreV3) and
+    `acc_at(t)` — the only two the board reads."""
+    __slots__ = ("_sim",)
+
+    def __init__(self, sim):
+        self._sim = sim
+
+    def score_at(self, t):
+        cp = self._sim.state_at(int(min(float(t), 1e9)))
+        return int(cp.score * getattr(self._sim, "score_scale", 1.0))
+
+    def acc_at(self, t):
+        cp = self._sim.state_at(int(min(float(t), 1e9)))
+        return max(0.0, min(1.0, cp.accuracy))
+
+
 class DanserHud:
     def __init__(self, skin_dir: Path, resolution, meta, beatmap,
-                 first_ms: int, last_ms: int, cfg=None):
+                 first_ms: int, last_ms: int, cfg=None, default_skin_dir=None):
         self.cfg = cfg
         # Resolve to the real skin root the same way CatchSkin does, so the HUD
         # finds score/combo/ranking/mod sprites for ANY skin whose assets live
@@ -31,26 +49,72 @@ class DanserHud:
         # .osk archives, etc.) — not just skins with skin.ini at the top level.
         from .skin import CatchSkin
         self.dir = CatchSkin._resolve_root(Path(skin_dir)) if skin_dir else None
+        # DEFAULT-SKIN FALLBACK (osu behaviour: an element the skin doesn't ship
+        # comes from the default skin). CatchSkin already did this for the
+        # fruit/catcher (render.py passes cfg.default_skin_dir); the HUD did NOT,
+        # so a skin with a score font but no scorebar / inputoverlay silently fell
+        # back to ARGON pieces instead of the real legacy ones. Search order is
+        # user skin → default skin.
+        self.default_dir = (CatchSkin._resolve_root(Path(default_skin_dir))
+                            if default_skin_dir else None)
         self.w, self.h = resolution
         self.meta = meta
         self.bm = beatmap
         self.first_ms = first_ms
         self.last_ms = max(last_ms, first_ms + 1)
         H = self.h
-        self.score_glyphs = self._glyphs("score", int(H * 0.050))
-        self.acc_glyphs = self._glyphs("score", int(H * 0.032))
+        # Honor skin.ini [Fonts] ScorePrefix / ComboPrefix — a skin can put its
+        # number font in a subfolder (e.g. "Fonts/score/score") instead of the
+        # top-level "score"/"combo". Without this the HUD looks for score-0.png
+        # at the root, finds nothing, and falls back to the Argon counters even
+        # though the skin ships a full font (the "missing skinned fonts" bug).
+        score_prefix, combo_prefix = self._font_prefixes()
+        # USER SKIN ONLY (default_ok=False): this doubles as the skin-HUD probe
+        # below, and the default skin ships score-* — letting it satisfy this
+        # would flip every skinless render out of the Argon HUD.
+        self.score_glyphs = self._glyphs(score_prefix, int(H * 0.050),
+                                         default_ok=False)
+        self.acc_glyphs = self._glyphs(score_prefix, int(H * 0.032))
         # legacy catch combo uses the combo font, falling back to the score font
         # (stable's default ComboPrefix == ScorePrefix == "score").
-        self.combo_glyphs = (self._glyphs("combo", int(H * 0.072))
-                             or self._glyphs("score", int(H * 0.072)))
+        self.combo_glyphs = (self._glyphs(combo_prefix, int(H * 0.072))
+                             or self._glyphs(score_prefix, int(H * 0.072)))
         # Per-element skin honoring (STD-style): if the uploaded skin ships a
         # number font, draw score / accuracy / combo from ITS glyphs instead of
         # the Argon counters (like STD's per-element approach). A skinless
         # render never loads glyphs, so it stays 100% Argon. The fruit/catcher
         # already switch to the skin in scene.py; this covers the HUD numbers.
-        self._use_skin_hud = bool(self.score_glyphs)
-        self.scorebar_bg = self._load("scorebar-bg", int(H * 0.05))
-        self.scorebar_col = self._load("scorebar-colour-0", int(H * 0.05))
+        # LAYOUT decision — lazer renders a LEGACY layout (score top-right, HP
+        # top-left, combo, key overlay) for any legacy skin, and the Argon layout
+        # only when there's no legacy skin at all. It is NOT keyed on the score
+        # font: `_use_skin_hud = bool(score_glyphs)` was an all-or-nothing switch,
+        # so a skin shipping scorebar + inputoverlay but no score font was thrown
+        # to the FULL Argon HUD and showed none of its own elements. Every element
+        # below now resolves independently (skin asset -> lazer's own default).
+        self._use_skin_hud = self.dir is not None and (
+            bool(self.score_glyphs)
+            or (self.dir / "skin.ini").is_file()
+            or self._resolve("scorebar-bg", default_ok=False) is not None
+            or self._resolve("inputoverlay-key", default_ok=False) is not None
+            or self._resolve("fruit-catcher-idle", default_ok=False) is not None
+        )
+        # Load the scorebar pieces at NATIVE size. They must share ONE scale
+        # factor: normalising each to the same HEIGHT (the old behaviour) ignores
+        # their different native aspect ratios, so the frame and the fill came out
+        # at wildly different widths and didn't line up at all.
+        # USER SKIN ONLY. lazer falls back to its OWN default health display
+        # (Argon) when a skin ships no scorebar — NOT to another skin's. Our
+        # bundled `_default-source` IS Night05, so allowing the default here
+        # painted Night05's purple starry scorebar onto every skin. Verified
+        # against Red's lazer captures: Night05/VOEZ/TOMAT-OS show their own
+        # scorebar; a skin without one shows lazer's Argon bar.
+        self.scorebar_bg = self._load_native("scorebar-bg", default_ok=False)
+        self.scorebar_col = self._load_native("scorebar-colour-0", default_ok=False)
+        # Does the USER's skin ship its own scorebar frame? If so we composite
+        # their two sprites the legacy way. If not, the DEFAULT skin's frame is
+        # used only as a colour source — its art sits inside a largely
+        # transparent, faintly-alpha'd canvas, so it can't be registered against
+        # the fill reliably; we draw a clean track instead (see _draw_scorebar).
         self.grades = {g: self._load(f"ranking-{g}", int(H * 0.060))
                        for g in ("X", "XH", "S", "SH", "A", "B", "C", "D")}
         self.mod_imgs = self._mods(meta.mods, int(H * 0.052))
@@ -77,6 +141,24 @@ class DanserHud:
         # frame (replays store positions, not keys); dash comes straight
         # from the replay frame's dash bit via the scene.
         self._kc_prev_x = None
+        # LEGACY key overlay (osu default when the skin ships no key element).
+        # catch has THREE inputs — left / right / dash — not std's B1/B2/B3,
+        # which is what the borrowed Argon counter was mislabelling them as.
+        # USER SKIN ONLY: the *default* skin's inputoverlay-key is a near-black
+        # button that's only legible over its background bar; without that bar it
+        # vanishes. So honour a skin that ships its own key art, else fall back to
+        # a clean drawn key box below (guaranteed readable over any gameplay).
+        self.key_bg = self._load("inputoverlay-background", int(H * 0.052),
+                                 default_ok=False)
+        self.key_img = self._load("inputoverlay-key", int(H * 0.042),
+                                  default_ok=False)
+        # The skin's OWN lazer HUD arrangement (MainHUDComponents.json), when it
+        # ships one. Empty dict -> default legacy placement below.
+        from .lazer_hud import load_layout
+        self.layout = load_layout(self.dir)
+        self._kc_counts = [0, 0, 0]
+        self._roll = {}     # rolling-counter state: key -> (from, to, start_t)
+        self._kc_held_prev = (False, False, False)
         # STD's Argon counters (score / accuracy / combo + wedges + song
         # progress) — argon_hud.py is the 1:1 port of the STD renderer's
         # Argon HUD components (owner directive: identical HUD across modes)
@@ -106,11 +188,19 @@ class DanserHud:
         def _on(n, default=True):
             return cfg is None or getattr(cfg, n, default)
 
+        # VERSUS OVERLAY (skinless): leaderboard + shared progress, no single HUD.
+        board = getattr(scene, "overlay_board", None)
+        if board:
+            if _on("show_progress"):
+                ah.draw_progress(img, t)
+            self._draw_overlay_board(img, board, t)
+            self._draw_watermark(img)
+            return np.asarray(img)
         # ---- SCORE WEDGES (ArgonWedgePiece backdrops, UNDER bar + score) ----
         if _on("show_score") or _on("show_hp_bar"):
             ah.draw_wedges(img)
 
-        # ---- HEALTH BAR (top-left; catch's argon_health at STD's spot) ----
+        # ---- HEALTH BAR (Argon health display; skinless renders only) ----
         if _on("show_hp_bar"):
             dt = (16.0 if self._hp_last_t is None
                   else max(0.0, min(100.0, t - self._hp_last_t)))
@@ -118,96 +208,178 @@ class DanserHud:
             arr = np.asarray(img).copy()
             self.argon_hp.update_draw(arr, scene.hp, dt)
             img = Image.fromarray(arr)
-            # the 45×3 BoxElement healthLine at (0, 30) lazer px (STD detail)
             ah.draw_health_line(img)
 
         if _on("show_score"):
-            # ---- SCORE (top-left, right edge x=250 lazer px, 6 wireframes) ----
             ah.draw_score(img, t, scene.score)
-            # ---- ACCURACY (top-right) + STD's procedural grade badge ----
             grade = None
             if (_on("show_grade") and t >= self.first_ms
                     and sum(scene.counts) > 0):
                 grade = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
             ah.draw_accuracy(img, t, scene.accuracy, grade=grade)
-            # ---- PP (top-right, under accuracy; catch house element) ----
             if (cfg is not None and getattr(cfg, "show_pp_counter", False)
                     and scene.pp > 0):
                 ah.draw_pp(img, scene.pp)
 
-        # ---- COMBO (bottom-left ×1.3, pop + red break flash, '<n>x') ----
         if _on("show_combo"):
             ah.draw_combo(img, t, scene.combo)
 
-        # ---- ArgonSongProgress strip (bottom, 90% width) ----
         if _on("show_progress"):
             ah.draw_progress(img, t)
 
-        # ---- Argon KEY COUNTER (bottom-right; B1=left B2=right B3=dash) ----
-        # Held states are derived, not stored: replays carry the catcher's
-        # absolute x + the dash bit, so L/R = the direction the catcher
-        # moved since the previous rendered frame (small deadzone kills
-        # interpolation jitter; real walk speed is ~8 osu px/frame at 60fps).
         if _on("show_key_counter"):
             x = float(getattr(scene, "catcher_x", 0.0))
             dashing = bool(getattr(scene, "dashing", False))
             dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
             self._kc_prev_x = x
-            dead = 0.05                       # osu px per frame
+            dead = 0.05
             ah.draw_key_counter(img, t, (dx < -dead, dx > dead, dashing))
 
-        # watermark (bottom-right) — free renders are forced to the site URL
         self._draw_watermark(img)
         return np.asarray(img)
 
-    # --- skin HUD (per-element skin honoring) ---------------------------------
 
     def _overlay_skin(self, img, scene) -> np.ndarray:
-        """Legacy-skin HUD: draw score / accuracy / combo from the SKIN's own
-        number glyphs (STD-style per-element honoring), HP from the skin's
-        scorebar. Only reached when the skin ships a score font — skinless
-        renders never get here (they stay all-Argon). The catcher/fruit come
-        from the skin via scene.py; progress is a thin bar."""
+        """LEGACY-skin HUD. lazer renders the legacy layout for any legacy skin,
+        with EVERY element resolving independently: the skin's asset when it ships
+        one, otherwise lazer's own default. Skinless renders never reach here."""
         cfg = self.cfg
         W, H = self.w, self.h
+        ah = self.argon
+        t = float(scene.time_ms)
 
         def _on(n, default=True):
             return cfg is None or getattr(cfg, n, default)
 
         pad = int(W * 0.010)
         top = int(H * 0.020)
-        # HP: skin scorebar (or its built-in PIL fallback when scorebar_bg is None)
+        # VERSUS OVERLAY: a per-player leaderboard replaces the single-player HUD
+        # (a lone score/acc/combo would be redundant + player-0-only). Keep the
+        # shared song progress; the board carries everyone's score/acc/counts.
+        board = getattr(scene, "overlay_board", None)
+        if board:
+            if _on("show_progress"):
+                self._draw_song_progress_pie(
+                    img, int(scene.time_ms),
+                    getattr(self, "_acc_box", (W - 10, 10, 0, 0)))
+                self._draw_argon_song_progress(img, int(scene.time_ms))
+            self._draw_overlay_board(img, board, t)
+            self._draw_watermark(img)
+            return np.asarray(img)
+        # ---- HEALTH BAR (top-left; catch's argon_health at STD's spot) ----
         if _on("show_hp_bar"):
-            self._draw_scorebar(img, max(0.0, min(1.0, scene.hp)))
-        # SCORE (top-right) + ACCURACY under it + grade badge
-        if _on("show_score"):
-            num = self._number(str(max(int(scene.score), 0)), self.score_glyphs, 0)
-            self._paste(img, num, W - pad - num.width, top)
-            acc_txt = f"{max(0.0, min(1.0, scene.accuracy)) * 100:.2f}%"
+            # LEGACY layout -> LegacyHealthDisplay (skin's scorebar sprites when it
+            # ships them, else the classic-default look). NOT the Argon bar: a
+            # legacy skin without a scorebar falls back to the classic DEFAULT
+            # skin, not to Argon.
+            self._draw_legacy_health(img, scene.hp, t)
+        if _on("show_score") and not self.score_glyphs:
+            # skin ships no number font -> lazer's own default counters
+            ah.draw_score(img, t, scene.score)
+            grade0 = None
+            if (_on("show_grade") and t >= self.first_ms and sum(scene.counts) > 0):
+                grade0 = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
+            ah.draw_accuracy(img, t, scene.accuracy, grade=grade0)
+        elif _on("show_score"):
+            # LegacyScoreCounter: TopRight, Scale .96, Margin horizontal 10.
+            disp = int(round(self._rolled("score", float(max(int(scene.score), 0)),
+                                          t, 1000.0)))
+            num = self._number(f"{disp:06d}",
+                               self.score_glyphs, self._score_overlap())
+            k = self.h / 768.0
+            sc_c = self._comp("LegacyScoreCounter")
+            s_scale = (sc_c.scale[1] if sc_c else 0.96)
+            sh = max(1, int(self.h * 0.052 * (s_scale / 0.96)))
+            num = num.resize((max(1, int(num.width * sh / num.height)), sh),
+                             Image.LANCZOS)
+            sx, sy = self._place("LegacyScoreCounter", num.width, num.height,
+                                 (W - int(10 * k) - num.width, int(10 * k)))
+            self._paste(img, num, sx, sy)
+            # LegacyAccuracyCounter: TopRight, Scale .576; its TOP edge sits on
+            # the score's BOTTOM edge (LegacySkin positions it at runtime).
+            disp_acc = self._rolled("acc", max(0.0, min(1.0, scene.accuracy)),
+                                    t, 375.0)
+            acc_txt = self._acc_text(disp_acc)
             accg = self.acc_glyphs or self.score_glyphs
-            accimg = self._number(acc_txt, accg, 0)
-            acc_y = top + num.height + int(H * 0.006)
-            self._paste(img, accimg, W - pad - accimg.width, acc_y)
+            accimg = self._number(acc_txt, accg, self._score_overlap())
+            ac_c = self._comp("LegacyAccuracyCounter")
+            a_scale = (ac_c.scale[1] if ac_c else 0.576)
+            ah_px = max(1, int(self.h * 0.052 * (a_scale / 0.96)))
+            accimg = accimg.resize(
+                (max(1, int(accimg.width * ah_px / accimg.height)), ah_px),
+                Image.LANCZOS)
+            axd = W - int(17 * k) - accimg.width
+            ayd = sy + num.height
+            ax, ay = self._place("LegacyAccuracyCounter", accimg.width,
+                                 accimg.height, (axd, ayd))
+            self._paste(img, accimg, ax, ay)
+            self._acc_box = (ax, ay, accimg.width, accimg.height)
             if (_on("show_grade") and scene.time_ms >= self.first_ms
                     and sum(scene.counts) > 0):
                 g = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
-                gkey = {"SS": "X"}.get(g, g)      # SS uses the ranking-X sprite
-                gim = self.grades.get(gkey)
+                gim = self.grades.get({"SS": "X"}.get(g, g))
                 if gim is not None:
-                    self._paste(img, gim,
-                                W - pad - max(num.width, accimg.width)
-                                - int(W * 0.006) - gim.width, top)
-        # COMBO (bottom-left)
+                    self._paste(img, gim, ax - int(W * 0.006) - gim.width, sy)
+        # COMBO — osu!CATCH does NOT use LegacyDefaultComboCounter: the catch
+        # legacy transformer only supplies KeyCounter/SpectatorList/Leaderboard.
+        # Catch's combo is LegacyCatchComboCounter, drawn ABOVE THE CATCHER and
+        # tracking Catcher.X, fading out ~1s after the last increment — which is
+        # why it appears at different x positions (and half-faded) in captures.
         if _on("show_combo"):
-            cg = self.combo_glyphs or self.score_glyphs
-            cimg = self._number(f"{max(int(scene.combo), 0)}x", cg, 0)
-            self._paste(img, cimg, pad, H - pad - cimg.height)
-        # PROGRESS (thin bar, bottom)
+            self._draw_catch_combo(img, scene, t)
+        # SONG PROGRESS — authentic: LegacySongProgress is a 33x33 circular PIE
+        # and legacy has NO time text (SongProgressInfo is Default/Argon only).
+        # A skin whose layout also asks for ArgonSongProgress (Red's, rotated -90)
+        # additionally gets that bar.
         if _on("show_progress"):
-            self._draw_progress(img, int(scene.time_ms))
+            self._draw_song_progress_pie(img, int(scene.time_ms),
+                                         getattr(self, "_acc_box",
+                                                 (W - 10, 10, 0, 0)))
+            self._draw_argon_song_progress(img, int(scene.time_ms))
+        # KEY COUNTER — the LEGACY inputoverlay (skin's own, else the default
+        # skin's), labelled with catch's real inputs: left / right / dash.
+        # Held = sign of catcher movement + the replay's dash bit.
+        if _on("show_key_counter"):
+            x = float(getattr(scene, "catcher_x", 0.0))
+            dashing = bool(getattr(scene, "dashing", False))
+            dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
+            self._kc_prev_x = x
+            self._draw_key_overlay(img, (dx < -0.05, dx > 0.05, dashing))
         # watermark (bottom-right)
         self._draw_watermark(img)
         return np.asarray(img)
+
+    def _draw_overlay_board(self, img, board, t) -> None:
+        """Versus Overlay leaderboard — the REAL std versus-merge `MergeBoard`
+        (osu-std, the glassy 'Rail' board), fed the catch sims' standardised
+        ScoreV3 via a HudData-shaped adapter. One persistent MergeBoard instance
+        (cached) so its row-slide animation runs; composited top-left each frame.
+        `board` = [(name, colour, sim, end_ms), …]."""
+        mb = getattr(self, "_merge_board", None)
+        if mb is None:
+            import os
+            import sys
+            std_pkg = os.environ.get("R3D_STD_PKG", "/home/foof/r3drender/osu-std")
+            if std_pkg not in sys.path:
+                sys.path.insert(0, std_pkg)
+            try:
+                from osu_std_renderer.merge import MergeBoard
+                entries = [(name, col, _CatchHud(sim), end_ms)
+                           for (name, col, sim, end_ms) in board]
+                skin_dirs = [d for d in (self.dir, self.default_dir) if d]
+                mb = self._merge_board = MergeBoard(entries, self.h,
+                                                    skin_dirs=skin_dirs)
+            except Exception:      # noqa: BLE001 — board never breaks a render
+                self._merge_board = False
+                return
+        if mb is False:
+            return
+        try:
+            _W, _H, arr = mb.render(float(t))
+            bimg = Image.fromarray(arr, "RGBA")
+            img.paste(bimg, (0, 0), bimg)
+        except Exception:          # noqa: BLE001
+            return
 
     def _draw_watermark(self, img) -> None:
         wm = getattr(self.cfg, "watermark", "") if self.cfg else ""
@@ -232,14 +404,385 @@ class DanserHud:
             d.rectangle([bx, by, bx + int(bw * hp), by + bh], fill=(120, 220, 150))
             return
         x0, y0 = int(self.w * 0.008), int(self.h * 0.012)
-        self._paste(img, self.scorebar_bg, x0, y0)
+        W = self.w
+        if self.scorebar_bg is not None:
+            # USER skin's own scorebar: composite their frame + fill at one shared
+            # scale (never normalise each to the same height — different native
+            # aspects would put the frame and fill at unrelated widths).
+            k = (W * 0.42) / max(1, self.scorebar_bg.width)
+            bg = self.scorebar_bg.resize(
+                (max(1, int(self.scorebar_bg.width * k)),
+                 max(1, int(self.scorebar_bg.height * k))), Image.LANCZOS)
+            self._paste(img, bg, x0, y0)
+            if self.scorebar_col is not None:
+                col = self.scorebar_col.resize(
+                    (max(1, int(self.scorebar_col.width * k)),
+                     max(1, int(self.scorebar_col.height * k))), Image.LANCZOS)
+                off_x = max(0, (bg.width - col.width) // 2)
+                off_y = max(0, (bg.height - col.height) // 2)
+                cw = max(1, int(col.width * hp))
+                self._paste(img, col.crop((0, 0, cw, col.height)),
+                            x0 + off_x, y0 + off_y)
+            return
+        # Fallback: clean track + the default skin's colour art as the fill.
+        bw, bh = int(W * 0.42), max(8, int(self.h * 0.022))
+        d = ImageDraw.Draw(img)
+        r = bh // 2
+        d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=r, fill=(24, 24, 32))
+        cw = max(1, int(bw * hp))
         if self.scorebar_col is not None:
-            # the colour bar fills from the left, clipped to current HP
-            off_x = int(self.scorebar_bg.width * 0.05)
-            off_y = (self.scorebar_bg.height - self.scorebar_col.height) // 2
-            cw = max(1, int(self.scorebar_col.width * hp))
-            clip = self.scorebar_col.crop((0, 0, cw, self.scorebar_col.height))
-            self._paste(img, clip, x0 + off_x, y0 + off_y)
+            fill = self.scorebar_col.resize((bw, bh), Image.LANCZOS)
+            self._paste(img, fill.crop((0, 0, cw, bh)), x0, y0)
+        else:
+            d.rounded_rectangle([x0, y0, x0 + cw, y0 + bh], radius=r,
+                                fill=(120, 220, 150))
+        d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=r,
+                            outline=(210, 210, 225), width=max(1, bh // 8))
+
+    # lazer applies a per-component Margin IN ADDITION to Anchor/Origin/Position.
+    # It lives in the component's C# ctor, not in MainHUDComponents.json, so it
+    # has to be reapplied here or right-anchored elements sit flush to the edge.
+    _MARGINS = {                       # type -> (horizontal, vertical) lazer units
+        "LegacyScoreCounter": (10.0, 0.0),
+        "LegacyAccuracyCounter": (17.0, 9.0),
+        "LegacyDefaultComboCounter": (10.0, 10.0),
+    }
+
+    def _place(self, type_name: str, w: float, h: float,
+               default_xy: tuple[int, int]) -> tuple[int, int]:
+        """Top-left px for a w x h element: the skin's own lazer layout entry if
+        it has one, else lazer's default legacy placement."""
+        c = self.layout.get(type_name)
+        if c is None:
+            return default_xy
+        x, y = c.place(self.w, self.h, w, h)
+        mh, mv = self._MARGINS.get(type_name, (0.0, 0.0))
+        if mh or mv:
+            k = self.h / 768.0
+            if c.anchor & 32:          # right-anchored -> inset leftwards
+                x -= int(mh * k)
+            elif c.anchor & 8:         # left-anchored -> inset rightwards
+                x += int(mh * k)
+            if c.anchor & 4:           # bottom-anchored -> inset upwards
+                y -= int(mv * k)
+            elif c.anchor & 1:         # top-anchored -> inset downwards
+                y += int(mv * k)
+        return x, y
+
+    def _comp(self, type_name: str):
+        return self.layout.get(type_name)
+
+    @staticmethod
+    def _legacy_fill_colour(hp: float):
+        """LegacyHealthDisplay.getFillColour — NOTE the genuine discontinuity at
+        hp=0.2 (source returns pure black just under it, 40% grey at it). Kept."""
+        if hp < 0.2:
+            u = max(0.0, min(1.0, (0.2 - hp) / 0.2))
+            return (int(0 + (255 - 0) * u), 0, 0)          # black -> red
+        if hp < 0.5:
+            u = max(0.0, min(1.0, (0.5 - hp) / 0.5))
+            v = int(255 * (1.0 - u))
+            return (v, v, v)                               # white -> black
+        return (255, 255, 255)
+
+    def _draw_legacy_health(self, img, hp: float, t: float = 0.0) -> None:
+        """LegacyHealthDisplay (NEW STYLE — the classic default skin ships
+        scorebar-marker, so new style is what a skin without its own scorebar
+        gets; it is NOT the Argon bar).
+
+        Geometry in display units: bg 695x44; fill 645x10 at (12.0, 12.48) with
+        the colour texture CROPPED from the right (never scaled); marker 24x24
+        centred at (12 + fillWidth, 17.48).
+        """
+        hp = max(0.0, min(1.0, hp))
+        k = self.h / 768.0
+        c = self._comp("LegacyHealthDisplay")
+        if c is not None:
+            k *= c.scale[1]
+        bg_w, bg_h = 695.0 * k, 44.0 * k
+        x0, y0 = self._place("LegacyHealthDisplay", bg_w, bg_h, (0, 0))
+        fx, fy = x0 + 12.0 * k, y0 + 12.48 * k
+        fw_max, fh = 645.0 * k, 10.0 * k
+        fw = fw_max * hp
+        col = self._legacy_fill_colour(hp)
+
+        if self.scorebar_bg is not None:
+            # the skin's own sprites, at one shared scale off the bg's width
+            sk = bg_w / max(1, self.scorebar_bg.width)
+            bg = self.scorebar_bg.resize(
+                (max(1, int(self.scorebar_bg.width * sk)),
+                 max(1, int(self.scorebar_bg.height * sk))), Image.LANCZOS)
+            self._paste(img, bg, int(x0), int(y0))
+            if self.scorebar_col is not None:
+                cimg = self.scorebar_col.resize(
+                    (max(1, int(self.scorebar_col.width * sk)),
+                     max(1, int(self.scorebar_col.height * sk))), Image.LANCZOS)
+                cw = max(1, int(cimg.width * hp))
+                self._paste(img, cimg.crop((0, 0, cw, cimg.height)),
+                            int(fx), int(fy))
+                fw = cimg.width * hp
+        else:
+            # classic-default look, drawn to the same geometry
+            d = ImageDraw.Draw(img)
+            r = bg_h / 2.0
+            d.rounded_rectangle([x0, y0 + bg_h * 0.18, x0 + bg_w, y0 + bg_h * 0.82],
+                                radius=r * 0.55, fill=(26, 28, 36))
+            if fw > 1:
+                fr = fh / 2.0
+                d.rounded_rectangle([fx, fy, fx + fw, fy + fh], radius=fr, fill=col)
+        # marker BULGE: on any HP GAIN the marker snaps to 1.2x then eases to
+        # 0.8x over 150ms and RESTS at 0.8 (lazer's actual behaviour, kept).
+        prev = getattr(self, "_hp_prev", None)
+        if prev is not None and hp > prev + 0.0005:
+            self._hp_bulge_t = t
+        self._hp_prev = hp
+        bt = getattr(self, "_hp_bulge_t", None)
+        if bt is None:
+            mscale = 1.0
+        else:
+            age = t - bt
+            mscale = (1.2 if age <= 0 else
+                      (1.2 + (0.8 - 1.2) * (age / 150.0) if age < 150.0 else 0.8))
+        # marker: glowing ball centred on the fill's right edge
+        mx, my = fx + fw, y0 + 17.48 * k
+        mr = 12.0 * k * mscale
+        layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ld = ImageDraw.Draw(layer)
+        for rr, a in ((mr * 1.9, 45), (mr * 1.35, 90)):
+            ld.ellipse([mx - rr, my - rr, mx + rr, my + rr], fill=(*col, a))
+        ld.ellipse([mx - mr * 0.62, my - mr * 0.62, mx + mr * 0.62, my + mr * 0.62],
+                   fill=(*col, 255))
+        img.paste(Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB"),
+                  (0, 0))
+
+    def _draw_song_progress_pie(self, img, t_ms: int, acc_box) -> None:
+        """LegacySongProgress — a 33x33 CIRCULAR PIE (not a bar, and with NO time
+        text; SongProgressInfo is Default/Argon only). 2px white ring, pie at 0.92
+        of the box, 4px centre dot. Gameplay = white @60% counting up; before the
+        first object it mirrors and counts DOWN in yellow-green."""
+        span = max(1, self.last_ms - self.first_ms)
+        frac = max(0.0, min(1.0, (t_ms - self.first_ms) / span))
+        k = self.h / 768.0
+        c = self._comp("LegacySongProgress")
+        if c is not None:
+            k *= c.scale[1]
+        box = max(8, int(33 * k))
+        # default: vertically centred on the accuracy counter, 18 units left of it
+        ax, ay, aw, ah = acc_box
+        dx = int(ax - 18 * (self.h / 768.0) - box)
+        dy = int(ay + ah / 2 - box / 2)
+        x, y = self._place("LegacySongProgress", box, box, (dx, dy))
+        d = ImageDraw.Draw(img)
+        intro = t_ms < self.first_ms
+        col = (199, 255, 47) if intro else (255, 255, 255)
+        prog = (1.0 - frac) if intro else frac
+        # pie (0.92 of the box), drawn from 12 o'clock
+        pad = int(box * 0.04)
+        pb = [x + pad, y + pad, x + box - pad, y + box - pad]
+        if prog > 0.001:
+            end = -90.0 + 360.0 * max(0.0, min(1.0, prog))
+            # ~60% alpha over the frame
+            layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            ImageDraw.Draw(layer).pieslice(pb, -90.0, end, fill=(*col, 153))
+            img.paste(Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB"),
+                      (0, 0))
+            d = ImageDraw.Draw(img)
+        # 2px white ring + 4px centre dot
+        d.ellipse([x, y, x + box, y + box], outline=(255, 255, 255),
+                  width=max(1, int(2 * k)))
+        r = max(1, int(2 * k))
+        cx, cy = x + box / 2, y + box / 2
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255))
+
+    def _draw_argon_song_progress(self, img, t_ms: int) -> None:
+        """ArgonSongProgress as placed by the skin (Red's is Rotation -90 -> a
+        VERTICAL bar down the left edge, show_graph/show_time false). Only drawn
+        when the skin's layout actually asks for it."""
+        c = self._comp("ArgonSongProgress")
+        if c is None:
+            return
+        span = max(1, self.last_ms - self.first_ms)
+        frac = max(0.0, min(1.0, (t_ms - self.first_ms) / span))
+        k = self.h / 768.0
+        vertical = abs(abs(c.rotation) - 90.0) < 1.0
+        # relative width -> fraction of the HUD rect's long axis
+        base = (self.w if not vertical else self.w) if c.width else 400.0
+        length = max(8, int(abs(float(c.width or 1.0)) * base * c.scale[0]))
+        thick = max(3, int(10 * k * c.scale[1]))
+        acc = c.settings.get("accent_colour") or "#FFFFFF"
+        try:
+            col = tuple(int(acc.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            col = (255, 255, 255)
+        d = ImageDraw.Draw(img)
+        if vertical:
+            x, y = self._place("ArgonSongProgress", thick, length,
+                               (int(self.w * 0.013), int(self.h * 0.08)))
+            y = max(0, min(y, self.h - length))
+            d.rectangle([x, y, x + thick, y + length], fill=(26, 26, 34))
+            fh = int(length * frac)
+            if fh > 0:
+                d.rectangle([x, y, x + thick, y + fh], fill=col)
+        else:
+            x, y = self._place("ArgonSongProgress", length, thick,
+                               (0, self.h - thick))
+            d.rectangle([x, y, x + length, y + thick], fill=(26, 26, 34))
+            fw = int(length * frac)
+            if fw > 0:
+                d.rectangle([x, y, x + fw, y + thick], fill=col)
+
+    def _draw_catch_combo(self, img, scene, t: float) -> None:
+        """LegacyCatchComboCounter — centred above the catcher, tracking its X.
+
+        lazer: counter centre sits 175 units above the top of the CatcherArea
+        (512 x 106.75) at Catcher.X. On increment it fades in, holds ~1000 ms and
+        fades out over 300 ms; the glyph pops 1.5 -> 0.8 (250 ms OutQuad) then
+        1.0 -> 1.1 (60 ms) -> 1.0 (30 ms). Combo 0 fades out over 400 ms.
+        """
+        combo = max(int(getattr(scene, "combo", 0)), 0)
+        prev = getattr(self, "_combo_prev", None)
+        if prev is None or combo != prev:
+            if prev is not None and combo > prev:
+                self._combo_t = t
+            elif combo == 0:
+                self._combo_t = None
+            self._combo_prev = combo
+        ct = getattr(self, "_combo_t", None)
+        if not combo or ct is None:
+            return
+        age = t - ct
+        if age < 0:
+            return
+        # fade in -> hold 1000 -> fade out 300
+        if age < 60.0:
+            alpha = age / 60.0
+        elif age < 1000.0:
+            alpha = 1.0
+        elif age < 1300.0:
+            alpha = 1.0 - (age - 1000.0) / 300.0
+        else:
+            return
+        # pop: 1.5 -> 0.8 over 250ms (OutQuad), then 1.0 -> 1.1 -> 1.0
+        if age <= 250.0:
+            u = age / 250.0
+            scale = 1.5 + (0.8 - 1.5) * (1.0 - (1.0 - u) ** 2)
+        elif age <= 310.0:
+            scale = 1.0 + 0.1 * ((age - 250.0) / 60.0)
+        elif age <= 340.0:
+            scale = 1.1 - 0.1 * ((age - 310.0) / 30.0)
+        else:
+            scale = 1.0
+        cg = self.combo_glyphs or self.score_glyphs
+        if not cg:
+            return
+        txt = self._number(str(combo), cg, self._combo_overlap())
+        if txt.width < 1 or txt.height < 1:
+            return
+        base_h = self.h * 0.075 * 0.8      # LegacyCatchComboCounter Scale = 0.8
+        th = max(1, int(base_h * scale))
+        tw = max(1, int(txt.width * th / txt.height))
+        txt = txt.resize((tw, th), Image.LANCZOS)
+        if alpha < 1.0:
+            txt.putalpha(txt.getchannel("A").point(lambda v: int(v * alpha)))
+        # catcher position -> screen, and 175 CatcherArea units above it
+        try:
+            cx = float(scene._sx(float(scene.catcher_x)))
+            k_pf = (float(scene._sx(512.0)) - float(scene._sx(0.0))) / 512.0
+            cy = float(scene.plane_y) - 175.0 * k_pf
+        except Exception:      # noqa: BLE001 - never let the HUD kill a render
+            cx, cy = self.w / 2.0, self.h * 0.45
+        self._paste(img, txt, int(cx - tw / 2), int(cy - th / 2))
+
+    def _draw_key_overlay(self, img, held) -> None:
+        """LEGACY key overlay. Catch's three inputs are LEFT / RIGHT / DASH — the
+        borrowed Argon counter labelled them B1/B2/B3, which is std/mania naming
+        and simply wrong here. Press counts are edge-counted from the held states
+        (the replay stores catcher positions + a dash bit, not key events).
+
+        `inputoverlay-background` is deliberately not drawn, and the key art is
+        taken from the USER's skin only: the default skin's key sprite is a
+        near-black button that's legible only over that background bar, and the
+        bar's art sits in a faintly-alpha'd canvas that can't be trimmed to its
+        opaque bounds — rotated for a vertical stack it renders as a smear. A
+        drawn key box is used instead, readable over any gameplay."""
+        labels = ("B1", "B2", "B3")
+        for i in range(3):
+            if held[i] and not self._kc_held_prev[i]:
+                self._kc_counts[i] += 1
+        self._kc_held_prev = (bool(held[0]), bool(held[1]), bool(held[2]))
+
+        W, H = self.w, self.h
+        d = ImageDraw.Draw(img)
+        # osu!stable stacks the key overlay VERTICALLY on the right edge.
+        ks = int(H * 0.058)
+        gap = int(ks * 0.14)
+        cf = _font(int(ks * 0.42))
+        lf = _font(int(ks * 0.34))
+        stack_w, stack_h = ks, ks * 3 + gap * 2
+        kk = H / 768.0
+        # catch: Anchor CentreRight, Origin TopRight, Position (0,-40)*1.6=(0,-64)
+        dflt = (W - stack_w, int(H * 0.5 - 64 * kk))
+        x0, y0 = self._place("LegacyKeyCounterDisplay", stack_w, stack_h, dflt)
+        for i, lab in enumerate(labels):
+            ky = y0 + i * (ks + gap)
+            if self.key_img is not None:
+                s = 0.88 if held[i] else 1.0   # pressed keys shrink (stable)
+                side = max(1, int(ks * s))
+                key = self.key_img.resize((side, side), Image.LANCZOS)
+                self._paste(img, key, x0 + (ks - side) // 2, ky + (ks - side) // 2)
+            else:
+                # lazer's default key counter: WHITE rounded box, dark glyph,
+                # YELLOW while held (verified in Red's captures).
+                # LegacyKeyCounterDisplay active colours are per FLOW INDEX:
+                # index<2 -> #ffde00 (yellow), index>=2 -> #f8009e (magenta).
+                # catch has 3 keys, so the DASH key (B3) flashes magenta.
+                act = (0xFF, 0xDE, 0x00) if i < 2 else (0xF8, 0x00, 0x9E)
+                fill = act if held[i] else (248, 248, 252)
+                d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
+                                    fill=fill, outline=(228, 228, 236),
+                                    width=max(1, ks // 22))
+            # lazer shows the COUNT once the key has been pressed, and the KEY
+            # NAME (B1/B2/B3) while the count is still 0 — image #43 shows
+            # exactly "5", "4", "B3".
+            n = self._kc_counts[i]
+            txt = str(n) if n > 0 else lab
+            f = cf if n > 0 else lf
+            bb = d.textbbox((0, 0), txt, font=f)
+            tx = x0 + (ks - (bb[2] - bb[0])) // 2 - bb[0]
+            ty = ky + (ks - (bb[3] - bb[1])) // 2 - bb[1]
+            d.text((tx, ty), txt, font=f, fill=(28, 28, 34))
+
+    @staticmethod
+    def _mmss(ms: int) -> str:
+        ms = max(0, int(ms))
+        return f"{ms // 60000:01d}:{(ms // 1000) % 60:02d}"
+
+    def _draw_progress_legacy(self, img, t_ms: int):
+        """Song progress: a VERTICAL bar down the LEFT edge (Red's lazer layout),
+        filling from the TOP downward, plus the progress COUNTER (elapsed/total).
+        The skin HUD previously drew only a bare horizontal strip and no counter."""
+        span = max(1, self.last_ms - self.first_ms)
+        frac = max(0.0, min(1.0, (t_ms - self.first_ms) / span))
+        W, H = self.w, self.h
+        d = ImageDraw.Draw(img)
+        bw = max(4, int(W * 0.0045))
+        x = int(W * 0.013)
+        y0, y1 = int(H * 0.085), int(H * 0.915)
+        r = bw // 2
+        d.rounded_rectangle([x, y0, x + bw, y1], radius=r, fill=(26, 26, 34))
+        fh = int((y1 - y0) * frac)
+        if fh > 0:
+            d.rounded_rectangle([x, y0, x + bw, y0 + fh], radius=r,
+                                fill=(244, 244, 250))
+        # counter, ABOVE the bar — below it would collide with the combo counter
+        # that sits bottom-left.
+        pf = _font(int(H * 0.021))
+        txt = f"{self._mmss(t_ms - self.first_ms)} / {self._mmss(span)}"
+        bb = d.textbbox((0, 0), txt, font=pf)
+        tx = x - bb[0]
+        ty = y0 - (bb[3] - bb[1]) - int(H * 0.014) - bb[1]
+        d.text((tx + 1, ty + 1), txt, font=pf, fill=(0, 0, 0))
+        d.text((tx, ty), txt, font=pf, fill=(236, 236, 244))
 
     def _draw_progress(self, img, t_ms: int):
         frac = (t_ms - self.first_ms) / (self.last_ms - self.first_ms)
@@ -286,17 +829,47 @@ class DanserHud:
 
     # --- loading --------------------------------------------------------------
 
-    def _resolve(self, base: str) -> Path | None:
-        if self.dir is None:
-            return None
-        for stem in (f"{base}@2x", base):
-            p = self.dir / f"{stem}.png"
-            if p.is_file():
-                return p
+    def _resolve(self, base: str, *, default_ok: bool = True) -> Path | None:
+        """Locate a skin asset: user skin first, then the DEFAULT skin (osu's
+        own fallback). `default_ok=False` restricts the search to the user's
+        skin — used for the score-font probe that decides skin-HUD vs Argon,
+        which must NOT be satisfied by the default skin (a skinless render has
+        to stay 100% Argon)."""
+        roots = [self.dir]
+        if default_ok and self.default_dir is not None:
+            roots.append(self.default_dir)
+        for root in roots:
+            if root is None:
+                continue
+            for stem in (f"{base}@2x", base):
+                p = root / f"{stem}.png"
+                if p.is_file():
+                    return p
+                # Case-insensitive fallback: osu skins are case-blind (Windows),
+                # but our filesystem isn't — e.g. skin.ini ComboPrefix "combo" vs
+                # files named "Combo-0.png". Scan the parent dir case-blind.
+                parent, want = p.parent, p.name.lower()
+                if parent.is_dir():
+                    for f in parent.iterdir():
+                        if f.name.lower() == want:
+                            return f
         return None
 
-    def _load(self, base: str, target_h: int) -> Image.Image | None:
-        p = self._resolve(base)
+    def _load_native(self, base: str, *, default_ok: bool = True):
+        """Load an asset at its LOGICAL size (an `@2x` asset is double-resolution
+        art, so its logical size is half the pixel size)."""
+        p = self._resolve(base, default_ok=default_ok)
+        if p is None:
+            return None
+        im = Image.open(p).convert("RGBA")
+        if "@2x" in p.name:
+            im = im.resize((max(1, im.width // 2), max(1, im.height // 2)),
+                           Image.LANCZOS)
+        return im
+
+    def _load(self, base: str, target_h: int,
+              *, default_ok: bool = True) -> Image.Image | None:
+        p = self._resolve(base, default_ok=default_ok)
         if p is None:
             return None
         im = Image.open(p).convert("RGBA")
@@ -309,12 +882,127 @@ class DanserHud:
         w = max(1, int(im.width * target_h / im.height))
         return im.resize((w, target_h), Image.LANCZOS)
 
-    def _glyphs(self, prefix: str, target_h: int) -> dict:
+    def _ini_font_int(self, key: str) -> int:
+        """An int from skin.ini [Fonts] (ScoreOverlap / ComboOverlap); 0 if absent."""
+        cache = getattr(self, "_ini_font_cache", None)
+        if cache is None:
+            cache = self._ini_font_cache = {}
+        if key in cache:
+            return cache[key]
+        out = 0
+        try:
+            ini = (self.dir / "skin.ini") if self.dir else None
+            if ini and ini.is_file():
+                in_fonts = False
+                for raw in ini.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw.strip()
+                    if line.startswith("["):
+                        in_fonts = line.lower() == "[fonts]"
+                        continue
+                    if in_fonts and ":" in line:
+                        k, _, val = line.partition(":")
+                        if k.strip().lower() == key:
+                            out = int(float(val.strip()))
+        except (OSError, ValueError):
+            out = 0
+        cache[key] = out
+        return out
+
+    @staticmethod
+    def _ease_out_quad(p: float) -> float:
+        p = 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
+        return 1.0 - (1.0 - p) * (1.0 - p)
+
+    def _roll_at(self, frm, to, t0, t, dur):
+        p = 1.0 if dur <= 0 else (t - t0) / dur
+        return frm + (to - frm) * self._ease_out_quad(p)
+
+    def _rolled(self, key: str, target: float, t: float, dur: float) -> float:
+        """Displayed value of a rolling counter. Lazer: fixed-duration Easing.Out
+        (score 1000ms, accuracy 375ms) — when the target changes the roll restarts
+        from the CURRENTLY displayed value, not from 0."""
+        st = self._roll.get(key)
+        if st is None:
+            self._roll[key] = (target, target, t - dur)   # start settled
+            return target
+        frm, to, t0 = st
+        if to != target:
+            frm = self._roll_at(frm, to, t0, t, dur)       # continue from here
+            to, t0 = target, t
+            self._roll[key] = (frm, to, t0)
+        return self._roll_at(frm, to, t0, t, dur)
+
+    @staticmethod
+    def _acc_text(acc: float) -> str:
+        """PercentageCounter FLOORS to 2dp (89.99999% -> 89.99%, never rounds up)."""
+        import math as _m
+        a = max(0.0, min(1.0, acc)) * 100.0
+        return f"{_m.floor(a * 100) / 100:.2f}%"
+
+    def _score_overlap(self) -> int:
+        return self._ini_font_int("scoreoverlap")
+
+    def _combo_overlap(self) -> int:
+        """skin.ini [Fonts] ComboOverlap — px the combo digits overlap. Red's
+        skin sets 8; we previously always used 0, leaving a visible gap."""
+        v = getattr(self, "_combo_overlap_cache", None)
+        if v is not None:
+            return v
+        out = 0
+        try:
+            ini = self.dir / "skin.ini" if self.dir else None
+            if ini and ini.is_file():
+                in_fonts = False
+                for raw in ini.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw.strip()
+                    if line.startswith("["):
+                        in_fonts = line.lower() == "[fonts]"
+                        continue
+                    if in_fonts and ":" in line:
+                        k, _, val = line.partition(":")
+                        if k.strip().lower() == "combooverlap":
+                            out = int(float(val.strip()))
+            
+        except (OSError, ValueError):
+            out = 0
+        self._combo_overlap_cache = out
+        return out
+
+    def _font_prefixes(self) -> tuple[str, str]:
+        """(ScorePrefix, ComboPrefix) from skin.ini [Fonts]; defaults score/combo.
+        Backslashes → forward slashes (osu path convention). Reads only the
+        shallowest skin.ini (what the HUD's resolved skin root points at)."""
+        score, combo = "score", "score"   # lazer: ComboPrefix defaults to "score"
+        if self.dir is None:
+            return score, combo
+        ini = self.dir / "skin.ini"
+        if not ini.is_file():
+            return score, combo
+        try:
+            in_fonts = False
+            for raw in ini.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if line.startswith("["):
+                    in_fonts = line.lower() == "[fonts]"
+                    continue
+                if in_fonts and ":" in line:
+                    k, _, v = line.partition(":")
+                    k, v = k.strip().lower(), v.strip().replace("\\", "/")
+                    if k == "scoreprefix" and v:
+                        score = v
+                    elif k == "comboprefix" and v:
+                        combo = v
+        except OSError:
+            pass
+        return score, combo
+
+    def _glyphs(self, prefix: str, target_h: int,
+                *, default_ok: bool = True) -> dict:
         chars = {str(i): str(i) for i in range(10)}
         chars.update({"comma": "comma", "dot": "dot", "percent": "percent", "x": "x"})
         out = {}
         for key, suffix in chars.items():
-            im = self._load(f"{prefix}-{suffix}", target_h)
+            im = self._load(f"{prefix}-{suffix}", target_h, default_ok=default_ok)
             # Some skins ship a decorative banner as score-percent (seen 1016x20).
             # A real digit/symbol glyph is roughly square; reject absurd aspect so
             # it can't balloon the number image (overlaps HUD + covers the field).
@@ -502,10 +1190,11 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
     else:
         col_w = int(W * 0.92)
 
-    # catch judgment row: Fruit / Drop / Droplet / Miss, colour-coded
+    # catch judgment row: Fruit / Drop / Droplet / Miss, colour-coded (droplet
+    # = lb_cards.RESULT_COLORS light blue, not gray — 2026-07-22 polish)
     cells = [("Fruit", meta.count_300, (255, 230, 120)),
              ("Drop", meta.count_100, (140, 220, 140)),
-             ("Droplet", meta.count_50, (180, 180, 180)),
+             ("Droplet", meta.count_50, (153, 219, 255)),
              ("Miss", meta.count_miss + meta.count_katu, (240, 80, 80))]
     f36 = _font(36)
     rendered = [(f"{lab}: {cnt}", col) for lab, cnt, col in cells]
