@@ -32,9 +32,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--default-skin", type=Path, default=None, help="fallback skin dir")
     ap.add_argument("--overlay-osr", action="append", type=Path, default=[],
                     help="extra replay(s) for a versus OVERLAY (repeatable)")
-    ap.add_argument("--catcher-skin", action="append", type=str, default=[],
-                    help="per-player catcher skin dir; order = primary then "
-                         "--overlay-osr; '-' or omitted = base skin (repeatable)")
+    ap.add_argument("--player-skin", "--catcher-skin", dest="player_skin",
+                    action="append", type=str, default=[], metavar="DIR",
+                    help="per-player skin dir for the OVERLAY platter (catcher) "
+                         "art — repeatable, one per player, aligned [primary, "
+                         "then each --overlay-osr in order]. '' (empty) or '-' "
+                         "= no preset -> that player keeps the base --skin "
+                         "catcher. The art is grayscaled + hue-tinted per "
+                         "player exactly like the base catcher; only the art "
+                         "under the tint changes. (--catcher-skin is a "
+                         "compatible alias.)")
     BA = argparse.BooleanOptionalAction
     ap.add_argument("--skip-intro", action=BA, default=True, help="start at first object")
     ap.add_argument("--results", action=BA, default=True, help="results-screen outro")
@@ -86,6 +93,20 @@ def main(argv: list[str] | None = None) -> int:
                          "The old render-DB Discord lookup is gone, so the "
                          "card can never show the owner's pfp.")
     args = ap.parse_args(argv)
+
+    # --player-skin count must align to the player list [primary, *overlay-osr].
+    # A mismatch NEVER kills a render: pad with "" (= base skin) / truncate,
+    # loudly, so a bot-side alignment bug degrades to base-skin platters.
+    player_skins = list(args.player_skin or [])
+    if player_skins:
+        expected = 1 + len(args.overlay_osr or [])
+        if len(player_skins) != expected:
+            print(f"[catch-renderer] warning: {len(player_skins)} "
+                  f"--player-skin entries for {expected} players "
+                  f"(primary + {len(args.overlay_osr or [])} overlay); "
+                  "padding/truncating with base-skin entries",
+                  file=sys.stderr)
+            player_skins = (player_skins + [""] * expected)[:expected]
 
     cfg = RenderConfig(
         resolution=args.resolution,
@@ -143,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     out = render_catch(args.osr, args.beatmap_dir, args.output, cfg,
                        progress_callback=progress,
                        overlay_osr=args.overlay_osr or None,
-                       catcher_skins=args.catcher_skin or None)
+                       catcher_skins=player_skins or None)
     print(f"\nwrote {out}", file=sys.stderr)
     return 0
 

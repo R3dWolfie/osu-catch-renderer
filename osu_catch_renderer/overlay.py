@@ -10,6 +10,10 @@ R3D forced to red.
 
 The catcher texture is grayscaled once at upload (render_core, key
 `fruit-catcher-idle__ovl`); the Argon bar-cap is already white so it tints as-is.
+Per-player platter skins (`--player-skin`): render_core additionally bakes each
+player's OWN skin's catcher art gray under `fruit-catcher-idle__ovl_p<i>`
+(deduped across players sharing one skin) and hands the aligned key list in as
+`catcher_keys` — the tint pipeline is unchanged, only the art under it swaps.
 """
 from __future__ import annotations
 
@@ -49,7 +53,7 @@ class CatchOverlaySim:
     `logo_start_ms`/`compute_pp_curve` surface, composites N players."""
 
     def __init__(self, sims: list, names: list, gray_keys=None,
-                 catcher_keys=None):
+                 catcher_keys=None, catcher_aspects=None):
         assert sims, "overlay needs at least one sim"
         self.sims = sims
         self.names = names
@@ -63,6 +67,13 @@ class CatchOverlaySim:
         # is per-player. None → everyone uses the base catcher gray.
         self.catcher_keys = list(catcher_keys) if catcher_keys else \
             ["fruit-catcher-idle__ovl"] * len(sims)
+        # per-player catcher aspect RATIO (that player's art h/w ÷ the BASE
+        # art's h/w): the rig's geometry is laid out by the base sim for the
+        # base art, so a player skin whose platter has a different aspect gets
+        # its sprite box re-heightened in _colorize_rig (width — the gameplay
+        # catch range — never changes). None / 1.0 → box untouched.
+        self.catcher_aspects = list(catcher_aspects) if catcher_aspects else \
+            [1.0] * len(sims)
         self.base = sims[0]
         n = len(self.base._objs)
         self._merged = [any(i < len(s._caught) and bool(s._caught[i])
@@ -72,17 +83,25 @@ class CatchOverlaySim:
     def compute_pp_curve(self, *a, **k):
         return None
 
-    def _colorize_rig(self, sprites, col, opacity, catcher_key):
+    def _colorize_rig(self, sprites, col, opacity, catcher_key, aspect=1.0):
         """Recolour a player's rig to their colour, drop it to `opacity`, and
         draw it ADDITIVELY so overlapping players' colours ADD UP and glow. The
-        CATCHER swaps to this player's OWN grayscale catcher (`catcher_key`); the
-        caught fruits swap to the BASE skin's grayscale fruit; both multiply-tint.
-        The white Argon bar/trail multiplies directly; everything else just takes
-        the opacity."""
+        CATCHER (body + trail ghosts — whichever sprite the base skin resolves,
+        fruit-catcher-idle or the legacy fruit-ryuuta) swaps to this player's
+        OWN grayscale catcher (`catcher_key`); the caught fruits swap to the
+        BASE skin's grayscale fruit; both multiply-tint. The white Argon
+        bar/trail multiplies directly; everything else just takes the opacity.
+        `aspect` (player art h/w ÷ base art h/w) re-heightens the catcher box
+        for the player's art, keeping the centre 0.46*h below the catcher plane
+        exactly as scene._catcher_sprites lays the base art out."""
         for sp in sprites:
             cr, cg, cb, ca = sp.color
-            if sp.texture_key == "fruit-catcher-idle":     # player's OWN catcher
-                sp.texture_key = catcher_key
+            if sp.texture_key in ("fruit-catcher-idle", "fruit-ryuuta"):
+                sp.texture_key = catcher_key           # player's OWN catcher
+                if abs(aspect - 1.0) > 1e-6:
+                    h2 = sp.h * aspect
+                    sp.y += (h2 - sp.h) * 0.46
+                    sp.h = h2
                 sp.color = (col[0] * cr, col[1] * cg, col[2] * cb, ca * opacity)
             elif sp.texture_key in self.gray_keys:          # base caught fruits
                 sp.texture_key = sp.texture_key + "__ovl"
@@ -160,7 +179,9 @@ class CatchOverlaySim:
             rig.extend(sim._catch_explosions(t_ms))
             ckey = (self.catcher_keys[i] if i < len(self.catcher_keys)
                     else "fruit-catcher-idle__ovl")
-            s.sprites.extend(self._colorize_rig(rig, col, opacity, ckey))
+            casp = (self.catcher_aspects[i] if i < len(self.catcher_aspects)
+                    else 1.0)
+            s.sprites.extend(self._colorize_rig(rig, col, opacity, ckey, casp))
 
         if base.cfg.letterbox_breaks and any(a <= t_ms <= b for a, b in base.bm.breaks):
             bar = base.screen_h * 0.11

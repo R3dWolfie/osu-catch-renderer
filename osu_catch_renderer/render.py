@@ -193,34 +193,58 @@ def render_core(
         # copy so the caught fruits + any base/unlinked catcher recolour cleanly.
         _overlay_gray_keys = {k for k in (skin.textures if skin else ())
                               if isinstance(k, str) and k.startswith("fruit")}
-        # PER-PLAYER catcher: each player's OWN skin's catcher, grayscaled to its
-        # own key; players without a linked skin (or whose skin has no catcher)
-        # fall back to the base catcher gray. `catcher_skins` aligns to
-        # [primary] + overlay_extra.
+        # PER-PLAYER catcher (platter): each player's OWN skin's catcher art,
+        # resolved by the SAME rules the base skin uses (CatchSkin: idle vs
+        # ryuuta by skin version, @2x preference, per-file fallback to the
+        # DEFAULT skin when the player's skin ships no catcher), grayscaled to
+        # its own key so the per-player hue tint recolours THEIR art. Players
+        # without a preset ('' / '-' / missing dir / unresolvable skin) fall
+        # back to the base catcher gray. Distinct dirs that resolve to the SAME
+        # catcher file (shared skin, or both falling through to the default)
+        # share ONE texture; art identical to the base skin's reuses ITS gray.
+        # `catcher_skins` aligns to [primary] + overlay_extra.
+        _base_ck = ((getattr(skin, "catcher_key", None) if skin else None)
+                    or "fruit-catcher-idle")
+        _base_gray = f"{_base_ck}__ovl"
+        _base_aspect = skin.catcher_aspect if skin is not None else 324 / 305
+        _base_src = (str(skin._resolve(skin.catcher_key))
+                     if skin is not None and skin.catcher_key else None)
         catcher_keys = []
+        catcher_aspects = []            # player art h/w ÷ base art h/w
+        _src_seen: dict[str, tuple[str, float]] = {}
         for i in range(1 + len(overlay_extra)):
             sd = (catcher_skins[i] if catcher_skins and i < len(catcher_skins)
                   else None)
             sd = str(sd) if sd and str(sd) not in ("", "-") else None
-            ctex = None
+            entry = None                # (texture_key, aspect_ratio_vs_base)
             if sd and Path(sd).is_dir():
                 try:
                     _csk = CatchSkin(Path(sd), cfg.default_skin_dir)
                     _ck = getattr(_csk, "catcher_key", None)
                     ctex = _csk.textures.get(_ck) if _ck else None
+                    _src = str(_csk._resolve(_ck)) if ctex is not None else None
+                    if _src is not None:
+                        if _src == _base_src:           # same art as the base
+                            entry = (_base_gray, 1.0)
+                        elif _src in _src_seen:         # shared player skin
+                            entry = _src_seen[_src]
+                        else:
+                            key = f"fruit-catcher-idle__ovl_p{i}"
+                            _player_catcher_bakes.append((key, ctex))
+                            entry = (key, _csk.catcher_aspect / _base_aspect)
+                            _src_seen[_src] = entry
                 except Exception:      # noqa: BLE001 — bad skin → base catcher
-                    ctex = None
-            if ctex is not None:
-                key = f"fruit-catcher-idle__ovl_c{i}"
-                _player_catcher_bakes.append((key, ctex))
-                catcher_keys.append(key)
-            else:
-                catcher_keys.append("fruit-catcher-idle__ovl")
+                    entry = None
+            if entry is None:
+                entry = (_base_gray, 1.0)
+            catcher_keys.append(entry[0])
+            catcher_aspects.append(entry[1])
         sim = CatchOverlaySim(
             [sim] + extra_sims,
             [getattr(meta, "player_name", "P1")]
             + [n for (_f, _m, n) in overlay_extra],
-            gray_keys=_overlay_gray_keys, catcher_keys=catcher_keys)
+            gray_keys=_overlay_gray_keys, catcher_keys=catcher_keys,
+            catcher_aspects=catcher_aspects)
     if cfg.show_pp_counter and osu_path is not None:
         sim.compute_pp_curve(osu_path, meta.mods)
     preempt = ar_to_preempt_ms(bm.ar)
