@@ -730,7 +730,18 @@ class DanserHud:
         near-black button that's legible only over that background bar, and the
         bar's art sits in a faintly-alpha'd canvas that can't be trimmed to its
         opaque bounds — rotated for a vertical stack it renders as a smear. A
-        drawn key box is used instead, readable over any gameplay."""
+        drawn key box is used instead, readable over any gameplay.
+
+        COUNT FONT: when number glyphs are available (skin's combo/score font,
+        like _draw_catch_combo uses), the press counts are rendered from THOSE
+        glyphs so the key counter matches the score/combo font — osu!stable
+        draws the skin's number font on the input overlay. Skin fonts are
+        usually LIGHT art, so over the drawn box the box flips to a dark
+        neutral (a white glyph on the white lazer box would be invisible);
+        a skin whose font is dark keeps the white box. A skin that ships its
+        own inputoverlay-key gets the glyphs straight over its sprite, exactly
+        like stable. No glyphs at all (Argon/skinless) -> the unchanged white
+        box + dark lazer glyph."""
         labels = ("B1", "B2", "B3")
         for i in range(3):
             if held[i] and not self._kc_held_prev[i]:
@@ -744,6 +755,35 @@ class DanserHud:
         gap = int(ks * 0.14)
         cf = _font(int(ks * 0.42))
         lf = _font(int(ks * 0.34))
+        # skin number font for the counts (combo first, like the catch combo).
+        glyphs = self.combo_glyphs or self.score_glyphs
+        dark_box = False
+        if glyphs:
+            # alpha-weighted mean luminance of the digit art (cached): light
+            # glyphs need the dark box, dark glyphs stay on the white one.
+            lum = getattr(self, "_kc_glyph_lum", None)
+            if lum is None:
+                asum = lsum = 0.0
+                amax = 0.0
+                for g in glyphs.values():
+                    a = np.asarray(g, dtype=np.float32)
+                    if a.ndim != 3 or a.shape[2] < 4:
+                        continue
+                    al = a[..., 3] / 255.0
+                    ll = (0.299 * a[..., 0] + 0.587 * a[..., 1]
+                          + 0.114 * a[..., 2]) / 255.0
+                    asum += float(al.sum())
+                    lsum += float((ll * al).sum())
+                    amax = max(amax, float(a[..., 3].max()))
+                lum = lsum / asum if asum > 0.0 else 1.0
+                self._kc_glyph_lum = lum
+                # peak alpha of the font: some skins ship a deliberately
+                # ghost-transparent number font (seen at 10% max alpha). The
+                # score/combo honour that, but a near-invisible digit inside
+                # the small key box reads as a bug -> the counter normalises
+                # such a font to readable opacity (shape/colour untouched).
+                self._kc_glyph_amax = amax
+            dark_box = self.key_img is None and lum >= 0.5
         stack_w, stack_h = ks, ks * 3 + gap * 2
         kk = H / 768.0
         # catch: Anchor CentreRight, Origin TopRight, Position (0,-40)*1.6=(0,-64)
@@ -751,18 +791,29 @@ class DanserHud:
         x0, y0 = self._place("LegacyKeyCounterDisplay", stack_w, stack_h, dflt)
         for i, lab in enumerate(labels):
             ky = y0 + i * (ks + gap)
+            # LegacyKeyCounterDisplay active colours are per FLOW INDEX:
+            # index<2 -> #ffde00 (yellow), index>=2 -> #f8009e (magenta).
+            # catch has 3 keys, so the DASH key (B3) flashes magenta.
+            act = (0xFF, 0xDE, 0x00) if i < 2 else (0xF8, 0x00, 0x9E)
             if self.key_img is not None:
                 s = 0.88 if held[i] else 1.0   # pressed keys shrink (stable)
                 side = max(1, int(ks * s))
                 key = self.key_img.resize((side, side), Image.LANCZOS)
                 self._paste(img, key, x0 + (ks - side) // 2, ky + (ks - side) // 2)
+            elif dark_box:
+                # dark neutral box so the skin's LIGHT glyphs read; held state
+                # keeps the accent as a full-strength outline + a muted fill
+                # (full accent fill would drown a white glyph).
+                fill = (tuple(int(0.35 * c + 0.65 * n) for c, n in
+                              zip(act, (34, 34, 42))) if held[i]
+                        else (34, 34, 42))
+                outline = act if held[i] else (92, 92, 104)
+                d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
+                                    fill=fill, outline=outline,
+                                    width=max(1, ks // 22))
             else:
                 # lazer's default key counter: WHITE rounded box, dark glyph,
                 # YELLOW while held (verified in Red's captures).
-                # LegacyKeyCounterDisplay active colours are per FLOW INDEX:
-                # index<2 -> #ffde00 (yellow), index>=2 -> #f8009e (magenta).
-                # catch has 3 keys, so the DASH key (B3) flashes magenta.
-                act = (0xFF, 0xDE, 0x00) if i < 2 else (0xF8, 0x00, 0x9E)
                 fill = act if held[i] else (248, 248, 252)
                 d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
                                     fill=fill, outline=(228, 228, 236),
@@ -771,12 +822,32 @@ class DanserHud:
             # NAME (B1/B2/B3) while the count is still 0 — image #43 shows
             # exactly "5", "4", "B3".
             n = self._kc_counts[i]
+            if n > 0 and glyphs:
+                # skin number font — same glyph assembly as the combo/score.
+                num = self._number(str(n), glyphs, self._combo_overlap())
+                if num.width > 0 and num.height > 0:
+                    th = max(1, int(ks * 0.46))
+                    tw = max(1, int(num.width * th / num.height))
+                    wmax = max(1, int(ks * 0.84))
+                    if tw > wmax:            # long counts: fit the box width
+                        th = max(1, int(th * wmax / tw))
+                        tw = wmax
+                    num = num.resize((tw, th), Image.LANCZOS)
+                    amax = getattr(self, "_kc_glyph_amax", 255.0)
+                    if 0.0 < amax < 200.0:   # ghost font -> readable digits
+                        k = 230.0 / amax
+                        num.putalpha(num.getchannel("A").point(
+                            lambda v: min(255, int(v * k))))
+                    self._paste(img, num, x0 + (ks - tw) // 2,
+                                ky + (ks - th) // 2)
+                continue
             txt = str(n) if n > 0 else lab
             f = cf if n > 0 else lf
             bb = d.textbbox((0, 0), txt, font=f)
             tx = x0 + (ks - (bb[2] - bb[0])) // 2 - bb[0]
             ty = ky + (ks - (bb[3] - bb[1])) // 2 - bb[1]
-            d.text((tx, ty), txt, font=f, fill=(28, 28, 34))
+            d.text((tx, ty), txt, font=f,
+                   fill=(232, 232, 238) if dark_box else (28, 28, 34))
 
     @staticmethod
     def _mmss(ms: int) -> str:
