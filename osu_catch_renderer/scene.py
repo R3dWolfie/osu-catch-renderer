@@ -33,6 +33,22 @@ def _hue(h: float):
     return colorsys.hsv_to_rgb(h % 1.0, 0.85, 1.0)
 
 
+def _obj_rand01(time_ms: float, x: float, series: int = 0) -> float:
+    """Deterministic per-object random in [0,1) — our stand-in for lazer's
+    StatelessRNG.NextSingle(RandomSeed, series), where an object's RandomSeed
+    is its start time (DrawableCatchHitObject). Stable per object across
+    frames, varies object-to-object; x joins the hash so two objects sharing
+    a start time still differ. splitmix32-style finalizer for avalanche."""
+    n = (int(round(time_ms)) * 2654435761
+         + int(round(x * 127.0)) * 40503 + series * 69069) & 0xFFFFFFFF
+    n ^= n >> 16
+    n = (n * 0x7FEB352D) & 0xFFFFFFFF
+    n ^= n >> 15
+    n = (n * 0x846CA68B) & 0xFFFFFFFF
+    n ^= n >> 16
+    return n / 4294967296.0
+
+
 @dataclass
 class _Checkpoint:
     time: int
@@ -775,21 +791,31 @@ class CatchSim:
                               color=(1.0, 0.0, 0.0, 1.0), rotation=rot, additive=True))
         return out
 
-    # Skinned-object quad multipliers (× fruit_screen). SIZE PARITY RULE: a
-    # legacy sprite FILLS its quad while the Argon pieces only light a fraction
-    # of theirs — so these are chosen to match the ARGON path's measured
-    # VISIBLE diameters (the fidelity reference), not Argon's quad sizes.
-    # Measured at CS3.3/720p (fruit_screen=118.9px, typical legacy art fills
-    # ~0.94 fruit / ~0.77 droplet of its canvas):
+    # Skinned-object quad multipliers (× fruit_screen). SIZE PARITY RULE for
+    # FRUIT/BANANA: a legacy sprite FILLS its quad while the Argon pieces only
+    # light a fraction of theirs — those two match the ARGON path's measured
+    # VISIBLE diameters. Measured at CS3.3/720p (fruit_screen=118.9px, typical
+    # legacy art fills ~0.94 fruit / ~0.77 droplet of its canvas):
     #   argon fruit ≈114px visible → skin quad 1.05 → ≈112-117px  (match)
     #   argon banana ring ≈115px  → skin quad 1.05 → ≈117px       (match)
-    #   argon droplet ≈29px       → skin quad 0.32 → ≈29px  (was 0.55 ≈50px)
-    #   argon tiny    ≈17px       → skin quad 0.19 → ≈17px  (was 0.30 ≈27px)
+    # DROPLETS are NOT argon-calibrated: lazer-argon's droplet blob is its own
+    # quarter-fruit look, and matching it (quad 0.32/0.19) rendered legacy
+    # droplets ~40% under real osu!. Legacy droplet size derives from lazer's
+    # LEGACY path instead:
+    #   droplet = 0.5 × the fruit scale  (half the 128 osu-px fruit diameter)
+    #           × 0.8 legacy sprite draw scale (LegacyDropletPiece.Scale=0.8f)
+    #           ⇒ true VISIBLE size 0.5·0.8 = 0.40 × fruit_screen
+    #   quad   = visible / art fill = 0.40 / 0.77          = 0.52  (was 0.32)
+    #   tiny   = 0.8 × droplet (stable's ratio) = 0.52·0.8 = 0.416 (was 0.19)
+    # Cross-check vs the classic default skin under lazer (fruit-drop.png,
+    # 128px canvas, art fill 0.555, drawn at 0.8·128·scale): visible = 0.444
+    # × fruit_screen — our 0.52·0.77 = 0.40 lands within 10% of that truth,
+    # between the old 0.55 (slightly big) and the argon-matched 0.32 (small).
     # Everything scales with CS via fruit_screen. Hyperfruit is NOT bigger —
     # see the hyper echo in _skinned_object (was ×1.32, an invented bump).
     _SKIN_FRUIT = 1.05
-    _SKIN_DROPLET = 0.32
-    _SKIN_TINY = 0.19
+    _SKIN_DROPLET = 0.52
+    _SKIN_TINY = 0.416
     _SKIN_BANANA = 1.05
 
     def _skinned_object(self, obj, x, y, t_ms) -> list[Sprite]:
@@ -802,7 +828,22 @@ class CatchSim:
             size = self.fruit_screen * (self._SKIN_DROPLET
                                         if obj.kind is ObjType.DROPLET
                                         else self._SKIN_TINY)
-            return self._base_overlay("fruit-drop", x, y, size, self._combo_tint(obj.combo_index))
+            # Droplets are the ONE object kind that SPINS while falling
+            # (fruits hold a frozen tilt — see the FRUIT branch below).
+            # lazer DrawableDroplet.Update:
+            #   Rotation = lerp(start, start + 720°,
+            #                   (now - spawn) / (TimePreempt + 2000))
+            #   start    = RandomSingle(1) * 20°   (per-object seed)
+            # DrawableTinyDroplet inherits the same spin. TimePreempt/2000
+            # tick on the beatmap clock, so map them to the replay's real
+            # timeline like self.preempt already is (2000 → 2000/rate).
+            rot = 0.0
+            if self.cfg.fruit_rotation:
+                start = _obj_rand01(obj.time_ms, obj.x, 1) * 0.349   # 0..20°
+                dur = self.preempt + 2000.0 / self.bm.rate           # real ms
+                rot = start + 12.566 * (t_ms - (obj.time_ms - self.preempt)) / dur
+            return self._base_overlay("fruit-drop", x, y, size,
+                                      self._combo_tint(obj.combo_index), rot)
         if obj.kind is ObjType.BANANA:
             if not sk.has("fruit-bananas"):
                 return self._argon_object(obj, x, y, t_ms)
@@ -822,11 +863,15 @@ class CatchSim:
         # Colour red, Depth 1) — NOT a bigger fruit and NOT a red-tinted core.
         size = self.fruit_screen * self._SKIN_FRUIT
         tint = self._combo_tint(obj.combo_index)
-        # gentle spin while falling, deterministic per fruit
+        # FROZEN random tilt — fruits do NOT spin while falling. lazer
+        # DrawableFruit.UpdateInitialTransforms: ScalingContainer.Rotation =
+        # (RandomSingle(1) - 0.5) * 40 — ONE random angle in ±20°, rolled at
+        # spawn from the object's seed and held all the way down. Only
+        # droplets rotate (branch above). The old code spun fruits
+        # continuously (rate × time) — an invented behaviour.
         rot = 0.0
         if self.cfg.fruit_rotation:
-            spin_dir = 1.0 if (int(obj.x) % 2 == 0) else -1.0
-            rot = spin_dir * (t_ms - obj.time_ms + self.preempt) * 0.0011
+            rot = (_obj_rand01(obj.time_ms, obj.x, 1) - 0.5) * 0.698   # ±20°
         out: list[Sprite] = []
         if hyper:
             # Straight-alpha (not additive): our GL batch draws ALL additive
