@@ -204,6 +204,12 @@ class DanserHud:
         self._kc_counts = [0, 0, 0]
         self._roll = {}     # rolling-counter state: key -> (from, to, start_t)
         self._kc_held_prev = (False, False, False)
+        # legacy key-press animation (lazer LegacyKeyCounter, see
+        # _draw_key_overlay): per key (scale_at_edge, target, edge_ms) —
+        # each edge retweens FROM the scale it interrupted — plus the
+        # first-activation time that drives the name->count crossfade.
+        self._kc_anim = [(1.0, 1.0, float("-inf"))] * 3
+        self._kc_first_press_t = [None, None, None]
         # STD's Argon counters (score / accuracy / combo + wedges + song
         # progress) — argon_hud.py is the 1:1 port of the STD renderer's
         # Argon HUD components (owner directive: identical HUD across modes)
@@ -476,7 +482,7 @@ class DanserHud:
         # Held = sign of catcher movement + the replay's dash bit.
         if _on("show_key_counter"):
             held, counts = self._input_from_scene(scene)
-            self._draw_key_overlay(img, held, counts)
+            self._draw_key_overlay(img, t, held, counts)
         # MOD ICONS — stable stacks them top-right under the accuracy row,
         # right-aligned with the accuracy block. ROW 3 clears the WHOLE of
         # row 2 (acc digits, pie AND grade badge): the clearance counts the
@@ -1055,7 +1061,7 @@ class DanserHud:
             cx, cy = self.w / 2.0, self.h * 0.45
         self._paste(img, txt, int(cx - tw / 2), int(cy - th / 2))
 
-    def _draw_key_overlay(self, img, held, counts=None) -> None:
+    def _draw_key_overlay(self, img, t, held, counts=None) -> None:
         """LEGACY key overlay. Catch's three inputs are LEFT / RIGHT / DASH — the
         borrowed Argon counter labelled them B1/B2/B3, which is std/mania naming
         and simply wrong here. Press counts are edge-counted from the held states
@@ -1077,7 +1083,23 @@ class DanserHud:
         a skin whose font is dark keeps the white box. A skin that ships its
         own inputoverlay-key gets the glyphs straight over its sprite, exactly
         like stable. No glyphs at all (Argon/skinless) -> the unchanged white
-        box + dark lazer glyph."""
+        box + dark lazer glyph.
+
+        PRESS ANIMATION (ppy/osu master, osu.Game/Skinning/LegacyKeyCounter.cs):
+        on press the keyContainer — the key sprite AND its text — scales about
+        its own centre to 0.75 over 160 ms Easing.Out (OutQuad), and back to
+        1.0 the same way on release; an edge mid-tween continues FROM the
+        current scale, exactly like an osu!framework transform replacing a
+        running one (tap-spam springs partway, never snaps). The sprite tint
+        flips INSTANTLY to the flow-index ActiveColour while held and back to
+        white on release (`keySprite.Colour = ActiveColour` has no transition
+        in source); the TEXT colour itself never changes on press — it is the
+        constant InputOverlayText colour — so the drawn-box paths keep their
+        existing held colour flip as the box-language stand-in for that sprite
+        tint. The first press additionally crossfades name -> count over the
+        same 160 ms Easing.Out (initialNameText.FadeOut / overlayKeyText.
+        FadeIn). `t` is MAP-time ms: lazer's HUD animates on the gameplay
+        clock, so DT/HT rate-scaling of the tween is inherent."""
         labels = ("B1", "B2", "B3")
         # Row mapping (unchanged, catch's three real inputs): B1 = move left,
         # B2 = move right, B3 = dash. `counts` = the sim's replay-resolution
@@ -1089,6 +1111,15 @@ class DanserHud:
             for i in range(3):
                 if held[i] and not self._kc_held_prev[i]:
                     self._kc_counts[i] += 1
+        t = float(t)
+        for i in range(3):
+            h, hp = bool(held[i]), self._kc_held_prev[i]
+            if h != hp:
+                # edge -> new ScaleTo from the interrupted tween's current value
+                self._kc_anim[i] = (self._kc_scale(i, t),
+                                    0.75 if h else 1.0, t)
+                if h and self._kc_first_press_t[i] is None:
+                    self._kc_first_press_t[i] = t
         self._kc_held_prev = (bool(held[0]), bool(held[1]), bool(held[2]))
 
         W, H = self.w, self.h
@@ -1138,27 +1169,39 @@ class DanserHud:
             # index<2 -> #ffde00 (yellow), index>=2 -> #f8009e (magenta).
             # catch has 3 keys, so the DASH key (B3) flashes magenta.
             act = (0xFF, 0xDE, 0x00) if i < 2 else (0xF8, 0x00, 0x9E)
+            # keyContainer scale at map-time t (see the docstring). `anim`
+            # gates every scaled/faded draw below: a key at rest takes the
+            # EXACT pre-animation code paths, so no-input stretches stay
+            # byte-identical frame to frame.
+            s = self._kc_scale(i, t)
+            anim = bool(held[i]) or s != 1.0
             if self.key_img is not None:
                 # Draw at NATIVE LOGICAL size * (H/768), centred on the cell —
                 # what stable/lazer do (see the key_img load comment). CACHED
-                # per pressed-state: only two sizes ever exist. Oversized art
-                # is clamped so a rogue sprite can never cover the playfield.
-                s = 0.88 if held[i] else 1.0   # pressed keys shrink (stable)
+                # by (w, h, tinted): the 160 ms tween quantises to a couple
+                # dozen pixel sizes per tint at most. Oversized art is clamped
+                # so a rogue sprite can never cover the playfield.
+                kw = self.key_img.width * kk
+                kh = self.key_img.height * kk
+                cap = ks * 2.0
+                if max(kw, kh) > cap:
+                    f = cap / max(kw, kh)
+                    kw, kh = kw * f, kh * f
+                tinted = bool(held[i])   # keySprite.Colour: instant in lazer
+                ck = (max(1, int(kw * s)), max(1, int(kh * s)), tinted)
                 cache = getattr(self, "_kc_key_cache", None)
                 if cache is None:
                     cache = self._kc_key_cache = {}
-                key = cache.get(s)
+                key = cache.get(ck)
                 if key is None:
-                    kw = self.key_img.width * kk
-                    kh = self.key_img.height * kk
-                    cap = ks * 2.0
-                    if max(kw, kh) > cap:
-                        f = cap / max(kw, kh)
-                        kw, kh = kw * f, kh * f
-                    key = self.key_img.resize(
-                        (max(1, int(kw * s)), max(1, int(kh * s))),
-                        Image.LANCZOS)
-                    cache[s] = key
+                    key = self.key_img.resize(ck[:2], Image.LANCZOS)
+                    if tinted:           # multiply by ActiveColour
+                        r, g, b, a = key.split()
+                        key = Image.merge("RGBA", (
+                            r.point(lambda v: v * act[0] // 255),
+                            g.point(lambda v: v * act[1] // 255),
+                            b.point(lambda v: v * act[2] // 255), a))
+                    cache[ck] = key
                 self._paste(img, key, x0 + (ks - key.width) // 2,
                             ky + (ks - key.height) // 2)
             elif dark_box:
@@ -1169,57 +1212,143 @@ class DanserHud:
                               zip(act, (34, 34, 42))) if held[i]
                         else (34, 34, 42))
                 outline = act if held[i] else (92, 92, 104)
-                d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
-                                    fill=fill, outline=outline,
-                                    width=max(1, ks // 22))
+                self._kc_box(d, x0, ky, ks, s, fill, outline)
             else:
                 # lazer's default key counter: WHITE rounded box, dark glyph,
                 # YELLOW while held (verified in Red's captures).
                 fill = act if held[i] else (248, 248, 252)
-                d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
-                                    fill=fill, outline=(228, 228, 236),
-                                    width=max(1, ks // 22))
+                self._kc_box(d, x0, ky, ks, s, fill, (228, 228, 236))
             # lazer shows the COUNT once the key has been pressed, and the KEY
             # NAME (B1/B2/B3) while the count is still 0 — image #43 shows
-            # exactly "5", "4", "B3".
+            # exactly "5", "4", "B3". `fade` is the one-time name->count
+            # crossfade (160 ms Easing.Out from the FIRST activation); it
+            # always completes before the release tween settles, so the rest
+            # path below never sees a partial fade.
             n = self._kc_counts[i]
-            if n > 0 and glyphs:
-                # skin number font — same glyph assembly as the combo/score.
-                # CACHED by (count, box size): the composed digits are pixel-
-                # identical every frame until the count changes, and the
-                # per-frame assemble + LANCZOS (x3 keys, every frame) was
-                # measurably dragging full skinned renders. PERF.
-                _cache = getattr(self, "_kc_num_cache", None)
-                if _cache is None:
-                    _cache = self._kc_num_cache = {}
-                num = _cache.get((n, ks))
-                if num is None:
-                    num = self._number(str(n), glyphs, self._combo_overlap())
+            fp = self._kc_first_press_t[i]
+            fade = ((1.0 if fp is None else self._kc_ease_out((t - fp) / 160.0))
+                    if n > 0 else 0.0)
+            if not anim:
+                # at rest — the EXACT pre-animation draw (byte-stable at idle)
+                if n > 0 and glyphs:
+                    num = self._kc_num(n, ks, glyphs)
                     if num.width > 0 and num.height > 0:
-                        th = max(1, int(ks * 0.46))
-                        tw = max(1, int(num.width * th / num.height))
-                        wmax = max(1, int(ks * 0.84))
-                        if tw > wmax:        # long counts: fit the box width
-                            th = max(1, int(th * wmax / tw))
-                            tw = wmax
-                        num = num.resize((tw, th), Image.LANCZOS)
-                        amax = getattr(self, "_kc_glyph_amax", 255.0)
-                        if 0.0 < amax < 200.0:  # ghost font -> readable digits
-                            k = 230.0 / amax
-                            num.putalpha(num.getchannel("A").point(
-                                lambda v: min(255, int(v * k))))
-                    _cache[(n, ks)] = num
-                if num.width > 0 and num.height > 0:
-                    self._paste(img, num, x0 + (ks - num.width) // 2,
-                                ky + (ks - num.height) // 2)
+                        self._paste(img, num, x0 + (ks - num.width) // 2,
+                                    ky + (ks - num.height) // 2)
+                    continue
+                txt = str(n) if n > 0 else lab
+                f = cf if n > 0 else lf
+                bb = d.textbbox((0, 0), txt, font=f)
+                tx = x0 + (ks - (bb[2] - bb[0])) // 2 - bb[0]
+                ty = ky + (ks - (bb[3] - bb[1])) // 2 - bb[1]
+                d.text((tx, ty), txt, font=f,
+                       fill=(232, 232, 238) if dark_box else (28, 28, 34))
                 continue
-            txt = str(n) if n > 0 else lab
-            f = cf if n > 0 else lf
-            bb = d.textbbox((0, 0), txt, font=f)
-            tx = x0 + (ks - (bb[2] - bb[0])) // 2 - bb[0]
-            ty = ky + (ks - (bb[3] - bb[1])) // 2 - bb[1]
-            d.text((tx, ty), txt, font=f,
-                   fill=(232, 232, 238) if dark_box else (28, 28, 34))
+            # animating: text scales WITH the container (name and count both
+            # live inside lazer's keyContainer) and honours the crossfade.
+            cx, cy = x0 + ks / 2.0, ky + ks / 2.0
+            col = (232, 232, 238) if dark_box else (28, 28, 34)
+            if fade < 1.0:               # key name (fading out after press 1)
+                self._kc_text(img, lab, _font(max(6, int(ks * 0.34 * s))),
+                              col, 1.0 - fade, cx, cy)
+            if n > 0 and fade > 0.0:     # the count (fading in on press 1)
+                if glyphs:
+                    num = self._kc_num(n, ks, glyphs)
+                    if num.width > 0 and num.height > 0:
+                        num = num.resize(
+                            (max(1, int(round(num.width * s))),
+                             max(1, int(round(num.height * s)))),
+                            Image.LANCZOS)
+                        if fade < 1.0:
+                            num.putalpha(num.getchannel("A").point(
+                                lambda v: int(v * fade)))
+                        self._paste(img, num, int(cx) - num.width // 2,
+                                    int(cy) - num.height // 2)
+                else:
+                    self._kc_text(img, str(n),
+                                  _font(max(6, int(ks * 0.42 * s))),
+                                  col, fade, cx, cy)
+
+    @staticmethod
+    def _kc_ease_out(u: float) -> float:
+        """osu!framework Easing.Out (= OutQuad), clamped to [0, 1]."""
+        u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+        return u * (2.0 - u)
+
+    def _kc_scale(self, i: int, t: float) -> float:
+        """lazer LegacyKeyCounter keyContainer scale at map-time t:
+        ScaleTo(0.75 press / 1.0 release, 160 ms, Easing.Out), each edge
+        retweening FROM the value it interrupted (set in _draw_key_overlay).
+        Settled tweens return their target EXACTLY (1.0 at rest), which the
+        byte-stability of idle frames relies on."""
+        frm, tgt, t0 = self._kc_anim[i]
+        u = (t - t0) / 160.0
+        if u >= 1.0:
+            return tgt
+        return frm + (tgt - frm) * self._kc_ease_out(u)
+
+    @staticmethod
+    def _kc_box(d, x0, ky, ks, s, fill, outline) -> None:
+        """The drawn key box at animation scale `s`, centred on its cell — the
+        stand-in for lazer's keyContainer scale on the box paths. `s == 1.0`
+        is the EXACT pre-animation call (byte-stable at idle)."""
+        if s == 1.0:
+            d.rounded_rectangle([x0, ky, x0 + ks, ky + ks], radius=ks // 5,
+                                fill=fill, outline=outline,
+                                width=max(1, ks // 22))
+            return
+        half = ks * s / 2.0
+        cx, cy = x0 + ks / 2.0, ky + ks / 2.0
+        bs = max(1, int(round(ks * s)))
+        d.rounded_rectangle([cx - half, cy - half, cx + half, cy + half],
+                            radius=bs // 5, fill=fill, outline=outline,
+                            width=max(1, bs // 22))
+
+    def _kc_num(self, n: int, ks: int, glyphs) -> Image.Image:
+        """The composed count digits for the key overlay — skin number font,
+        same glyph assembly as the combo/score. CACHED by (count, box size):
+        the composed digits are pixel-identical every frame until the count
+        changes, and the per-frame assemble + LANCZOS (x3 keys, every frame)
+        was measurably dragging full skinned renders. PERF."""
+        _cache = getattr(self, "_kc_num_cache", None)
+        if _cache is None:
+            _cache = self._kc_num_cache = {}
+        num = _cache.get((n, ks))
+        if num is None:
+            num = self._number(str(n), glyphs, self._combo_overlap())
+            if num.width > 0 and num.height > 0:
+                th = max(1, int(ks * 0.46))
+                tw = max(1, int(num.width * th / num.height))
+                wmax = max(1, int(ks * 0.84))
+                if tw > wmax:        # long counts: fit the box width
+                    th = max(1, int(th * wmax / tw))
+                    tw = wmax
+                num = num.resize((tw, th), Image.LANCZOS)
+                amax = getattr(self, "_kc_glyph_amax", 255.0)
+                if 0.0 < amax < 200.0:  # ghost font -> readable digits
+                    k = 230.0 / amax
+                    num.putalpha(num.getchannel("A").point(
+                        lambda v: min(255, int(v * k))))
+            _cache[(n, ks)] = num
+        return num
+
+    def _kc_text(self, img, txt, f, col, alpha, cx, cy) -> None:
+        """Animated key-overlay text: rendered on a transparent tile so it can
+        fade (the frame is RGB — ImageDraw cannot alpha-blend onto it) and
+        pasted centred on the key cell."""
+        d0 = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        bb = d0.textbbox((0, 0), txt, font=f)
+        tw, th = bb[2] - bb[0], bb[3] - bb[1]
+        if tw <= 0 or th <= 0:
+            return
+        a = max(0, min(255, int(round(alpha * 255.0))))
+        if a == 0:
+            return
+        tile = Image.new("RGBA", (tw + 2, th + 2), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((1 - bb[0], 1 - bb[1]), txt, font=f,
+                                  fill=col + (a,))
+        self._paste(img, tile, int(cx) - tile.width // 2,
+                    int(cy) - tile.height // 2)
 
     @staticmethod
     def _mmss(ms: int) -> str:
