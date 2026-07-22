@@ -51,6 +51,7 @@ class CatchSkin:
         self.textures: dict[str, np.ndarray] = {}
         self._load_elements()
         self.combo_colors = self._load_combos()
+        self._load_hyper_colors()
         # Which sprite IS the catcher for this skin (lazer version rule above);
         # None = no legacy catcher → scene falls back to the Argon bar.
         self.catcher_key = self._resolve_catcher_key()
@@ -184,6 +185,43 @@ class CatchSkin:
                 self.combo_colors_custom = (d == self._user_skin_dir)
                 return [combos[k] for k in sorted(combos)]
         return list(_DEFAULT_COMBOS)
+
+    def _load_hyper_colors(self) -> None:
+        """skin.ini [CatchTheBeat] hyperdash cue colours, as 0..1 RGB:
+          HyperDash           — catcher tint / trail colour  (default red)
+          HyperDashFruit      — the hyperfruit echo          (falls back to HyperDash)
+          HyperDashAfterImage — the hyper-onset after-image  (falls back to HyperDash)
+        Scoped to the USER's chosen skin dir only (like combo_colors_custom):
+        the bundled service default (`_default-source` / Night05) ships its own
+        HyperDash line, but it is nobody's choice — a user skin with NO
+        HyperDash must keep osu!'s stock red, not inherit the bundle's."""
+        vals: dict[str, tuple[float, float, float]] = {}
+        d = self._user_skin_dir
+        ini = (d / "skin.ini") if d else None
+        if ini is not None and ini.is_file():
+            section = ""
+            for line in ini.read_text(errors="replace").splitlines():
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    section = s[1:-1].strip().lower()
+                    continue
+                if section != "catchthebeat" or ":" not in s:
+                    continue
+                key, val = s.split(":", 1)
+                key = key.strip().lower()
+                if key not in ("hyperdash", "hyperdashfruit",
+                               "hyperdashafterimage"):
+                    continue
+                try:  # R,G,B — a 4th (alpha) component is ignored like stable
+                    r, g, b = (min(255, max(0, int(x)))
+                               for x in val.split(",")[:3])
+                except ValueError:
+                    continue
+                vals[key] = (r / 255, g / 255, b / 255)
+        self.hyper_color = vals.get("hyperdash", (1.0, 0.0, 0.0))
+        self.hyper_fruit_color = vals.get("hyperdashfruit", self.hyper_color)
+        self.hyper_afterimage_color = vals.get("hyperdashafterimage",
+                                               self.hyper_color)
 
     def _aspect(self, key: str, default: float) -> float:
         t = self.textures.get(key)

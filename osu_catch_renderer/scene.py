@@ -83,6 +83,17 @@ class CatchSim:
         self.cfg = cfg
         self.skin = skin
         self.meta = meta
+        # skin.ini [CatchTheBeat] hyperdash cue colours (parsed by CatchSkin;
+        # HyperDashFruit/AfterImage fall back to HyperDash, which defaults to
+        # red). ONLY the skinned draw paths read these — the Argon elements
+        # keep lazer's hard red (the Argon skin has no skin.ini to honour).
+        _red = (1.0, 0.0, 0.0)
+        self.hyper_rgb = (getattr(skin, "hyper_color", _red)
+                          if skin is not None else _red)
+        self.hyper_fruit_rgb = (getattr(skin, "hyper_fruit_color", _red)
+                                if skin is not None else _red)
+        self.hyper_after_rgb = (getattr(skin, "hyper_afterimage_color", _red)
+                                if skin is not None else _red)
         # Overlay/versus mode forces the white Argon catcher so a per-player
         # colour tint reads cleanly (tinting a skin's already-coloured catcher
         # muddies it). Single renders leave this False = skin catcher as usual.
@@ -821,10 +832,12 @@ class CatchSim:
             # Straight-alpha (not additive): our GL batch draws ALL additive
             # sprites in a second pass ON TOP, which would wash the fruit core
             # red — painter's order in the normal pass keeps the echo behind
-            # the opaque fruit exactly like lazer's Depth 1.
+            # the opaque fruit exactly like lazer's Depth 1. Echo colour =
+            # skin.ini HyperDashFruit → HyperDash → red (LegacySkin's
+            # CatchSkinColour.HyperDashFruit lookup chain).
             out.append(Sprite(x, y, size * 1.2, size * 1.2,
                               texture_key=sk.fruit_key(obj.combo_index),
-                              color=(1.0, 0.0, 0.0, 0.7), rotation=rot))
+                              color=(*self.hyper_fruit_rgb, 0.7), rotation=rot))
         out.extend(self._base_overlay(sk.fruit_key(obj.combo_index), x, y, size, tint, rot))
         return out
 
@@ -868,7 +881,12 @@ class CatchSim:
         (grows 0.95→1.2×, drifts up 10 px, fades over 1200 ms). Replaces the old
         3-ghost/80 ms non-additive trail that was ~50× too sparse to see."""
         out: list[Sprite] = []
-        trail_rgb = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt)
+        # white → skin.ini HyperDash colour by hyper_amt (lazer's hyper dash
+        # trail colour; red default = the old hardcoded (1, 1-amt, 1-amt)).
+        hr, hg, hb = self.hyper_rgb
+        trail_rgb = (1.0 + (hr - 1.0) * hyper_amt,
+                     1.0 + (hg - 1.0) * hyper_amt,
+                     1.0 + (hb - 1.0) * hyper_amt)
         for age in range(16, 801, 16):
             alpha = 0.4 * (1.0 - age / 800.0) ** 5
             if alpha < 0.004:
@@ -892,7 +910,7 @@ class CatchSim:
                     continue
                 px, _ = catcher_x_at(self.frames, h_start)
                 out.extend(self._catcher_ghost(
-                    self._sx(px), (1.0, 0.0, 0.0), alpha,
+                    self._sx(px), self.hyper_after_rgb, alpha,
                     scale=0.95 + 0.25 * e, dy=-10.0 * self.unit_px * e))
         return out
 
@@ -914,10 +932,14 @@ class CatchSim:
         ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
         if (ck is not None and self.skin.has(ck)
                 and not self.force_argon_catcher):
-            # lazer tints the catcher red ONLY when hyperdashing (Catcher
+            # lazer tints the catcher ONLY when hyperdashing, in the skin's
+            # [CatchTheBeat] HyperDash colour (Catcher falls back to
             # DEFAULT_HYPER_DASH_COLOUR = Color4.Red); plain dashing leaves the
             # body white — the trail is the dash cue, not a body tint.
-            tint = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 1.0)
+            hr, hg, hb = self.hyper_rgb
+            tint = (1.0 + (hr - 1.0) * hyper_amt,
+                    1.0 + (hg - 1.0) * hyper_amt,
+                    1.0 + (hb - 1.0) * hyper_amt, 1.0)
             w = self.catcher_w
             h = w * self.skin.catcher_aspect
             return [Sprite(x, self.plane_y + h * 0.46, w, h,
