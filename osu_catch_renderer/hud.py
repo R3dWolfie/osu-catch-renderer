@@ -695,22 +695,26 @@ class DanserHud:
         if alpha < 1.0:
             txt.putalpha(txt.getchannel("A").point(lambda v: int(v * alpha)))
         # catcher position -> screen: track the catcher like stable/lazer's
-        # LegacyCatchComboCounter, centred just under the catch plane (on the
-        # catcher body). SceneState carries the geometry (catcher_px /
-        # plane_y_px / pf_unit_px) — the old code called scene._sx(), which
-        # SceneState never had, so the except-fallback silently pinned the
-        # counter at screen centre every frame (the "combo doesn't follow the
-        # catcher" bug).
+        # LegacyCatchComboCounter. SceneState carries the geometry
+        # (catcher_px / plane_y_px / pf_unit_px).
+        # PLACEMENT: lazer's CatcherArea builds the CatchComboDisplay with
+        # Origin=Centre + Margin{Bottom=350} anchored at the area's TOP (the
+        # catch plane) — the bottom margin shifts the layout centre 175 units
+        # UP, i.e. the counter is centred 175 playfield units ABOVE the catch
+        # plane, at Catcher.X. The old code ADDED 53 units (screen-y grows
+        # downward), parking the number BELOW the plane, on the catcher body
+        # — the "combo counter in the platter" bug. 175 units reads a touch
+        # floaty against real captures at 720p, so 120 is used: clearly above
+        # the plate + any pile, still visually attached to the catcher.
         cx = getattr(scene, "catcher_px", None)
         py = getattr(scene, "plane_y_px", None)
         up = getattr(scene, "pf_unit_px", None)
         if cx is not None and py is not None and up:
             cx = float(cx)
-            # half the CatcherArea height (106.75 osu units) below the plane
-            cy = float(py) + 53.0 * float(up)
+            cy = float(py) - 120.0 * float(up)
             # keep the number fully on screen at the playfield edges
             cx = max(tw / 2.0 + 2.0, min(self.w - tw / 2.0 - 2.0, cx))
-            cy = min(cy, self.h - th / 2.0 - 2.0)
+            cy = max(th / 2.0 + 2.0, min(cy, self.h - th / 2.0 - 2.0))
         else:                  # legacy snapshot without geometry
             cx, cy = self.w / 2.0, self.h * 0.45
         self._paste(img, txt, int(cx - tw / 2), int(cy - th / 2))

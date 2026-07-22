@@ -368,6 +368,23 @@ class CatchSim:
                     cur_base += _BASE[ObjType.TINY_DROPLET]
                 else:
                     ctiny_miss += 1
+            elif obj.kind is ObjType.BANANA and caught and self.skin is not None:
+                # BANANAS ARE CAUGHT TOO ("bananas ignored by the platter"):
+                # pass 1 already marks them caught geometrically, which makes
+                # them vanish at the plane — but they never touched the plate,
+                # so a shower looked like it rained straight through. lazer's
+                # Catcher explodes a caught banana off the plate IMMEDIATELY
+                # (bananas never persist in the pile; no combo/hp change,
+                # LargeBonus +50 not modelled — see note above). clear_time is
+                # pre-set to the catch time so the group pass below leaves it
+                # alone, and anim="banana" routes the burst to the banana
+                # sprite. Skin-gated: the certified argon path stays
+                # bit-identical (flagged as a known gap for the next argon
+                # certification pass).
+                cxb, _ = catcher_x_at(self.frames, obj.time_ms)
+                self._plate.append([obj.time_ms, (obj.x - cxb) * 0.55, 0.0,
+                                    obj.combo_index, obj.hyperdash,
+                                    obj.time_ms, "banana"])
             # lazer standardised: 500k·acc·comboRatio + 500k·acc⁵·progress ×mult
             if max_combo_portion > 0 and max_base_total > 0 and cur_max_base > 0:
                 sacc = cur_base / cur_max_base
@@ -391,6 +408,8 @@ class CatchSim:
             if ci not in group_last or o.time_ms >= group_last[ci][0]:
                 group_last[ci] = (o.time_ms, c)
         for rec in self._plate:
+            if rec[6] is not None:      # banana: pre-cleared at catch time
+                continue
             gt, gc = group_last.get(rec[3], (rec[0], True))
             rec[5] = max(gt, rec[0])                    # clear_time (>= catch time)
             rec[6] = "explode" if gc else "drop"
@@ -493,9 +512,17 @@ class CatchSim:
             sprites = self._object_sprites(obj, self._sx(obj.x), y, t_ms)
             if not caught and t_ms > obj.time_ms:
                 mu = (t_ms - obj.time_ms) / 250.0            # 0..1 through the miss
+                # Hidden + legacy skin: the fruit already faded to alpha 0 on
+                # approach (stable keeps that SAME sprite for the fall-through)
+                # — without this, an invisible fruit POPPED back into view as
+                # it fell past the catcher. _hd_alpha is 0 past the plane, so
+                # missed objects stay hidden. Skinless (argon) path untouched:
+                # certified bit-identical.
+                hd = (self._hd_alpha(obj.time_ms, t_ms)
+                      if (self.hidden and self.skin is not None) else 1.0)
                 for sp in sprites:
                     r, g, b, al = sp.color
-                    sp.color = (r, g, b, al * max(0.0, 1.0 - mu))
+                    sp.color = (r, g, b, al * max(0.0, 1.0 - mu) * hd)
                     sp.rotation = sp.rotation * (1.0 + mu)   # tilt → 2× over 250ms
             elif self.hidden:
                 a = self._hd_alpha(obj.time_ms, t_ms)
@@ -629,13 +656,16 @@ class CatchSim:
                     (0.070, 0.486, 1.0), (0.949, 0.094, 0.224))
 
     def _combo_tint(self, combo_index: int) -> tuple[float, float, float]:
-        # lazer precedence: a USER skin that ships its own [Colours]
-        # (skin.ini Combo1..N → CatchSkin.combo_colors_custom) keeps them
-        # over the map's; else the .osu [Colours]; else the skin palette
-        # (default-skin ini fallback); else lazer's default combo colours.
+        # Precedence — stable AND lazer at DEFAULT settings ("beatmap skin/
+        # colours" enabled in both games): the MAP's own [Colours] wins when
+        # the .osu ships one; else the user skin's Combo1..N; else the
+        # default-skin palette; else lazer's default combo colours.
+        # The old order let a user skin's ini beat the map, so an all-red
+        # skin (e.g. 3e9449 "red theme") painted EVERY fruit red — users read
+        # that as the hyperdash cue leaking onto normal fruits ("impossible-
+        # looking" renders). Skinless path order is unchanged (map → lazer
+        # palette), keeping the certified argon output bit-identical.
         sk = self.skin
-        if sk is not None and getattr(sk, "combo_colors_custom", False):
-            return sk.combo_color(combo_index)
         cc = self.bm.combo_colors
         if cc:
             r, g, b = cc[combo_index % len(cc)]
@@ -935,12 +965,29 @@ class CatchSim:
         Skin fruit sprite at 0.5× object; Argon fallback when skinless."""
         import math
         out: list[Sprite] = []
+        # HIDDEN + legacy skin: stable re-parents the SAME approach sprite
+        # onto the plate — under HD it reached the plane at alpha 0, so the
+        # caught pile is INVISIBLE in the real game ("notes don't show up on
+        # the platter when HD is on"). Skinless path deliberately untouched:
+        # lazer's CaughtObject.RestoreState does not copy alpha, so the
+        # (certified bit-identical) argon path keeping its pile matches lazer.
+        if self.hidden and self.skin is not None:
+            return out
         up = self.unit_px
         # Caught fruit pile ABOVE the catcher — lazer anchors the caught container
         # to the catcher's TopCentre, so the pile rests ON the catch line and
         # builds UPWARD (in front of the bar). Was `+0.1` = BELOW the line, which
         # sank the base fruits behind the bar (Red's flag).
-        base_y = self.plane_y - self.fruit_screen * 0.34
+        if self.skin is not None:
+            # Legacy catcher art carries its visible dish AT/just below the
+            # catch plane (the sprite hangs below plane_y). The 0.34 lift —
+            # tuned for the argon BAR — parked fruit bottoms ~a half-fruit
+            # above the dish ("caught fruits float above the platter"). 0.10
+            # rests them on/in the dish; the argon branch keeps the certified
+            # 0.34 bit-identical.
+            base_y = self.plane_y - self.fruit_screen * 0.10
+        else:
+            base_y = self.plane_y - self.fruit_screen * 0.34
         size = self.fruit_screen * 0.5
         for ct, ox, oy, ci, hy, clear_t, anim in self._plate:
             if clear_t is None or t_ms < ct:
@@ -969,13 +1016,30 @@ class CatchSim:
                 else:
                     u = min(1.0, (age - 250.0) / 500.0)
                     sy = (y0 - 50.0 * up) + 100.0 * up * (1.0 - math.cos(u * math.pi / 2.0))  # InSine
-            out.extend(self._plate_fruit(sx, sy, size, ci, v, alpha))
+            out.extend(self._plate_fruit(sx, sy, size, ci, v, alpha,
+                                         banana=(anim == "banana")))
         return out
 
-    def _plate_fruit(self, x, y, size, ci, v, alpha) -> list[Sprite]:
+    def _plate_fruit(self, x, y, size, ci, v, alpha,
+                     banana: bool = False) -> list[Sprite]:
         """One caught fruit — the skin's fruit sprite (base+overlay) if present,
-        else the Argon blob+pip — drawn at `alpha`."""
+        else the Argon blob+pip — drawn at `alpha`. `banana` swaps in the
+        banana sprite/tint for a caught banana's immediate burst (bananas only
+        enter the plate list on skinned renders — see _simulate)."""
         sk = self.skin
+        if banana:
+            tint = (1.0, 0.85, 0.15)
+            if sk is not None and sk.has("fruit-bananas"):
+                sprites = self._base_overlay("fruit-bananas", x, y, size, tint)
+                for sp in sprites:
+                    r, g, b, al = sp.color
+                    sp.color = (r, g, b, al * alpha)
+                return sprites
+            d = size * ARGON_CANVAS   # skin ships no banana art -> argon banana
+            return [Sprite(x, y, d, d, texture_key="argon_pip",
+                           color=(1, 1, 1, alpha)),
+                    Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
+                           color=(*tint, alpha), additive=True)]
         tint = self._combo_tint(ci)
         if sk is not None and sk.has(sk.fruit_key(ci)):
             sprites = self._base_overlay(sk.fruit_key(ci), x, y, size, tint)
