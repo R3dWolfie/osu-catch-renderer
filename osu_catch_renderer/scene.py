@@ -139,8 +139,18 @@ class CatchSim:
         self.final_accuracy = 1.0
         self.has_bg = has_bg
         self.bg_dim = 0.30
-        # approach window in the rate-adjusted (real) timeline the replay uses
-        self.preempt = ar_to_preempt_ms(beatmap.ar) / beatmap.rate
+        # Approach window in MAP time — the axis the whole sim runs on (replay
+        # frames and object times both live in beatmap ms; DT/HT only speed up
+        # PLAYBACK, which render.py handles via map_step = frame_ms·rate).
+        # AR preempt is defined in gameplay-clock ms and the gameplay clock IS
+        # the map timeline, so the window is the full ar_to_preempt_ms — the
+        # old ÷rate double-applied the mod: DT fruits spawned 1.5× too late
+        # (approach 2.25× too fast in real time) and HT fruits lingered 1.33×
+        # too long ("why is it like AR 3" — the on-screen density equals the
+        # map-time window, which must equal the game's preempt exactly).
+        # Verified against replay ground truth: DT (Circulation, 194) and HT
+        # (Dance of The Violins, 266) both judge frame-exact on this axis.
+        self.preempt = ar_to_preempt_ms(beatmap.ar)
         # Hidden (HD, mod bit 8): fruits fade out as they near the catcher.
         self.hidden = bool((getattr(meta, "mods", 0) or 0) & 8)
         self.half = cs_to_catcher_half_width(beatmap.cs)
@@ -174,6 +184,10 @@ class CatchSim:
         self._caught: list[bool] = []
         self._checkpoints: list[_Checkpoint] = []
         self._catches: list = []   # (time, x, combo_index, hyper, combo)
+        # legacy hit-lighting events (skinned renders): one per CAUGHT
+        # palpable object incl. bananas — (time, plate_offset_osu, kind,
+        # combo_index, combo_at_judgement). See _legacy_hit_lighting.
+        self._light_events: list = []
         # Plate pile (lazer computePositionInStack): per caught fruit, a mutable
         # [catch_time, offset_x, offset_y (osu units, ride the catcher),
         #  combo_index, hyper, clear_time, anim] — clear_time/anim filled by the
@@ -291,6 +305,15 @@ class CatchSim:
             _reconcile(ObjType.FRUIT, m.count_300)
             _reconcile(ObjType.DROPLET, m.count_100)
             _reconcile(ObjType.TINY_DROPLET, m.count_50)
+            # --- combo-aware reconcile (honesty pass, std-renderer pattern):
+            # counts now match the header, but the END-OF-MAP combo the HUD
+            # shows is the run AFTER THE LAST MISS — with a wrongly-PLACED
+            # miss it is wrong even with perfect counts. If our miss placement
+            # cannot reproduce the header's max_combo, move misses between
+            # same-kind objects (cheapest geometric margins first) until it
+            # does. Runs BEFORE pass 2, so score/hp/plate/animation stay one
+            # coherent stream — no display-only patching.
+            self._reconcile_combo_runs(objs, margin, m)
 
         # --- pass 2: lazer-standardised ScoreV3 from reconciled catches ------
         # Base numerics per catch judgement: Fruit=Great=300, Droplet=
@@ -299,9 +322,10 @@ class CatchSim:
         # power-based curve of the current lazer ScoreProcessor, NOT the old
         # log-based ScoreV2 the renderer used to scale to meta.score. The
         # 500k combo / 500k accuracy split is then ×mod-multiplier.
-        # NOTE: banana-shower bonus (LargeBonus +50 each) is not modelled —
-        # there are no Banana objects in the sim, so score is a hair low on
-        # banana maps. Fine for ranking; flagged for exactness.
+        # Banana-shower bonus IS modelled: each caught banana adds a
+        # LargeBonus (+50) to the bonus portion (see the BANANA branch),
+        # exactly like lazer's ScoreProcessor — banana-only maps score
+        # 50/banana instead of flat-lining at 0.
         _BASE = {ObjType.FRUIT: 300.0, ObjType.DROPLET: 30.0,
                  ObjType.TINY_DROPLET: 10.0}
         _combo_kinds = (ObjType.FRUIT, ObjType.DROPLET)
@@ -320,6 +344,7 @@ class CatchSim:
         c300 = c100 = c50 = ckatu = cmiss = ctiny_miss = 0
         combo_portion = 0.0
         cur_base = cur_max_base = 0.0
+        bonus = 0.0   # banana LargeBonus: +50 per caught banana (lazer ScoreV3)
         pending_hyper: int | None = None
         pending_target: float | None = None
         import random as _random
@@ -358,6 +383,10 @@ class CatchSim:
                     if obj.kind is ObjType.FRUIT:
                         c300 += 1
                         self._catches.append((obj.time_ms, obj.x, obj.combo_index, obj.hyperdash, combo))
+                        _cxl, _ = catcher_x_at(self.frames, obj.time_ms)
+                        self._light_events.append(
+                            (obj.time_ms, obj.x - _cxl, "fruit",
+                             obj.combo_index, combo, obj.x))
                         # lazer computePositionInStack: land at where it was caught
                         # (offset from plate centre), then jitter ONLY to de-overlap
                         # against fruit already on the plate this combo.
@@ -384,6 +413,10 @@ class CatchSim:
                                             obj.hyperdash, None, None])
                     else:
                         c100 += 1
+                        _cxl, _ = catcher_x_at(self.frames, obj.time_ms)
+                        self._light_events.append(
+                            (obj.time_ms, obj.x - _cxl, "droplet",
+                             obj.combo_index, combo, obj.x))
                     if obj.hyperdash:
                         pending_hyper = obj.time_ms
                         pending_target = obj.hyper_target_x
@@ -400,7 +433,18 @@ class CatchSim:
                     cur_base += _BASE[ObjType.TINY_DROPLET]
                 else:
                     ctiny_miss += 1
-            elif obj.kind is ObjType.BANANA and caught and self.skin is not None:
+            elif obj.kind is ObjType.BANANA and caught:
+                # lazer standardised scoring counts each caught banana as a
+                # LargeBonus (+50) in the BONUS portion of the total — on
+                # banana-only maps ("Endless Spinner") this is the ENTIRE
+                # score, and the old sim held the HUD at 0 the whole render.
+                bonus += 50.0
+                _cxl, _ = catcher_x_at(self.frames, obj.time_ms)
+                self._light_events.append(
+                    (obj.time_ms, obj.x - _cxl, "banana",
+                     obj.combo_index, combo, obj.x))
+            if (obj.kind is ObjType.BANANA and caught
+                    and self.skin is not None):
                 # BANANAS ARE CAUGHT TOO ("bananas ignored by the platter"):
                 # pass 1 already marks them caught geometrically, which makes
                 # them vanish at the plane — but they never touched the plate,
@@ -417,14 +461,15 @@ class CatchSim:
                 self._plate.append([obj.time_ms, (obj.x - cxb) * 0.55, 0.0,
                                     obj.combo_index, obj.hyperdash,
                                     obj.time_ms, "banana"])
-            # lazer standardised: 500k·acc·comboRatio + 500k·acc⁵·progress ×mult
+            # lazer standardised: (500k·acc·comboRatio + 500k·acc⁵·progress
+            # + bonusPortion) × mult — bananas contribute ONLY via bonus.
             if max_combo_portion > 0 and max_base_total > 0 and cur_max_base > 0:
                 sacc = cur_base / cur_max_base
                 score = (500_000.0 * sacc * (combo_portion / max_combo_portion)
                          + 500_000.0 * (sacc ** 5) * (cur_max_base / max_base_total)
-                         ) * _mod_mult
+                         + bonus) * _mod_mult
             else:
-                score = 0.0
+                score = bonus * _mod_mult   # banana-only map: pure bonus
             caught_acc = c300 + c100 + c50
             total_acc = caught_acc + cmiss + ckatu + ctiny_miss
             acc = (caught_acc / total_acc) if total_acc else 1.0
@@ -468,6 +513,129 @@ class CatchSim:
                 # slider fix + LegacyLastTickOffset), so the running accuracy comes
                 # straight from the sim. final_counts/accuracy above are the
                 # replay's authoritative numbers, used only for the results screen.
+
+    # --- input overlay timeline ----------------------------------------------
+
+    def _build_inputs(self) -> None:
+        """Per-REPLAY-FRAME input segments for the key overlay (lazer
+        CatchReplayFrame.FromLegacy semantics): over a frame interval
+        [aᵢ, aᵢ₊₁) the held actions are MoveLeft/MoveRight = sign of the x
+        delta TO the next frame (lazer attaches the movement to the EARLIER
+        frame), and Dash = the frame's own button bit. Prefix onset counts
+        give tap-accurate press counters at replay resolution — deriving
+        held/counts from lerped VIDEO-frame positions aliased rapid taps into
+        holds (a 60 ms tap can live entirely inside one 33 ms video frame's
+        interval and net dx≈0) and froze the counters during tap-spam."""
+        fs = self.frames
+        starts: list[int] = []
+        held: list[tuple[bool, bool, bool]] = []
+        counts: list[tuple[int, int, int]] = []
+        nl = nr = nd = 0
+        prev = (False, False, False)
+        for a, b in zip(fs, fs[1:]):
+            st = (b.x < a.x, b.x > a.x, bool(a.dashing))
+            starts.append(a.time_ms)
+            held.append(st)
+            nl += st[0] and not prev[0]
+            nr += st[1] and not prev[1]
+            nd += st[2] and not prev[2]
+            counts.append((nl, nr, nd))
+            prev = st
+        if fs:   # tail: stationary, last frame's dash state
+            st = (False, False, bool(fs[-1].dashing))
+            starts.append(fs[-1].time_ms)
+            held.append(st)
+            nd += st[2] and not prev[2]
+            counts.append((nl, nr, nd))
+        self._in_starts, self._in_held, self._in_counts = starts, held, counts
+
+    def input_state(self, t0: float, t1: float):
+        """((L, R, D) held anywhere within the video-frame interval (t0, t1],
+        (nL, nR, nD) presses begun up to t1) — both at replay-frame
+        resolution. `t0/t1` are MAP-time ms (the replay's own axis), so
+        DT/HT rate mods are inherently accounted for by the caller's
+        map_step-sized interval."""
+        if getattr(self, "_in_starts", None) is None:
+            self._build_inputs()
+        starts = self._in_starts
+        if not starts:
+            return (False, False, False), (0, 0, 0)
+        i1 = bisect_right(starts, t1) - 1
+        if i1 < 0:
+            return (False, False, False), (0, 0, 0)
+        i0 = max(0, bisect_right(starts, t0) - 1)
+        L = R = D = False
+        for i in range(i0, i1 + 1):
+            # skip the part of segment i0 that ended before t0 ONLY when a
+            # later segment begins inside the window (no smear back in time)
+            if i > i0 or i1 == i0 or starts[min(i + 1, len(starts) - 1)] > t0:
+                sl, sr, sd = self._in_held[i]
+                L, R, D = L or sl, R or sr, D or sd
+        return (L, R, D), self._in_counts[i1]
+
+    def _reconcile_combo_runs(self, objs, margin, m) -> None:
+        """Move misses so the combo-run structure reproduces the header's
+        max_combo (the .osr ground truth) — the safety net behind the sim.
+
+        The geometric sim + count reconcile can place a miss on the wrong
+        object (borderline geometry, stable HR offsets on maps whose nested
+        generation is not bit-exact, …). Combo runs are fully determined by
+        WHERE the misses sit among the combo objects (fruits + large
+        droplets), so: if max(run) != meta.max_combo, search single-miss
+        moves (miss → caught same-kind object elsewhere; per-type counts
+        preserved) and apply the target-hitting move with the lowest
+        geometric cost (sum of |margin| of the two flipped calls — prefer
+        un-missing the near-catch and missing the near-miss). No move can
+        hit the target → leave the sim as-is (results screen still shows the
+        header's own numbers). Runs before pass 2: the moved miss genuinely
+        falls through / the moved catch lands on the plate, so the visual
+        stream, HUD combo, score and HP all stay coherent."""
+        target = int(getattr(m, "max_combo", 0) or 0)
+        if target <= 0:
+            return
+        kinds = (ObjType.FRUIT, ObjType.DROPLET)
+        idxs = [i for i, o in enumerate(objs) if o.kind in kinds]
+        if not idxs:
+            return
+        caught = self._caught
+        pos_of = {i: p for p, i in enumerate(idxs)}
+        n = len(idxs)
+
+        def max_run(miss_positions) -> int:
+            prev, mx = -1, 0
+            for s in miss_positions:
+                mx = max(mx, s - prev - 1)
+                prev = s
+            return max(mx, n - 1 - prev)
+
+        miss_pos = sorted(pos_of[i] for i in idxs if not caught[i])
+        if max_run(miss_pos) == target:
+            return
+        # cost bound: the search is m×n — worth it only where it matters (a
+        # low-miss play whose ONE misplaced miss glares). Heavy-miss plays are
+        # statistically close already and the search would be seconds-slow.
+        if len(miss_pos) > 80:
+            return
+        best = None   # (cost, src_obj_index, dst_obj_index)
+        for src in [i for i in idxs if not caught[i]]:
+            sp = pos_of[src]
+            others = [p for p in miss_pos if p != sp]
+            kind = objs[src].kind
+            for dst in idxs:
+                if not caught[dst] or objs[dst].kind is not kind:
+                    continue
+                cand = others + [pos_of[dst]]
+                cand.sort()
+                if max_run(cand) != target:
+                    continue
+                cost = abs(margin[src]) + abs(margin[dst])
+                if best is None or cost < best[0]:
+                    best = (cost, src, dst)
+        if best is None:
+            return
+        _, src, dst = best
+        caught[src] = True
+        caught[dst] = False
 
     def state_at(self, t_ms: int) -> _Checkpoint:
         if not self._checkpoints:
@@ -536,7 +704,16 @@ class CatchSim:
             _hi = bisect_right(self._obj_times, t_ms + self.preempt)
         else:
             _lo, _hi = 0, len(self._objs)
-        for obj, caught in zip(self._objs[_lo:_hi], self._caught[_lo:_hi]):
+        # Z-ORDER (Top-250 player report, verified against lazer): the catch
+        # playfield draws EARLIER hit objects IN FRONT — an earlier plain
+        # fruit occludes a later hyperfruit's red echo/ring. Painter's order
+        # means later-drawn = on top, so iterate the visible window in
+        # REVERSE time order (latest first, earliest last). Both argon and
+        # skinned paths; each object's own layer order is unchanged. (The GL
+        # batch still lifts ADDITIVE sprites to a second pass — additive
+        # blending commutes, so ordering there is visually irrelevant.)
+        for obj, caught in zip(reversed(self._objs[_lo:_hi]),
+                               reversed(self._caught[_lo:_hi])):
             end = obj.time_ms if caught else obj.time_ms + 250
             if not (obj.time_ms - self.preempt <= t_ms <= end):
                 continue
@@ -568,6 +745,13 @@ class CatchSim:
         cx, dashing = catcher_x_at(self.frames, t_ms)
         s.catcher_x = float(cx)          # HUD key counter (L/R from x delta)
         s.dashing = bool(dashing)        # HUD key counter (dash key state)
+        # replay-frame-accurate key overlay state over THIS video frame's
+        # map-time interval (render_core sets video_step_ms = frame_ms·rate;
+        # the fallback derives it from cfg — identical for single renders).
+        step = getattr(self, "video_step_ms", None)
+        if step is None:
+            step = 1000.0 / self.cfg.fps * (getattr(self.bm, "rate", 1.0) or 1.0)
+        s.keys_held, s.key_counts = self.input_state(t_ms - step, t_ms)
         scx = self._sx(cx)
         # screen-space catcher geometry for the HUD's catcher-tracking combo
         # (SceneState is a snapshot — the HUD never sees the sim itself)
@@ -586,7 +770,7 @@ class CatchSim:
             s.sprites.extend(self._dash_trail(t_ms, hyper_amt))
         s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper_amt, t_ms))
         s.sprites.extend(self._plate_stack(scx, t_ms))
-        s.sprites.extend(self._catch_explosions(t_ms))
+        s.sprites.extend(self._catch_explosions(t_ms, scx))
 
         # letterbox + dim during breaks (drawn last so bars sit on top)
         if self.cfg.letterbox_breaks and in_break:
@@ -688,16 +872,23 @@ class CatchSim:
                     (0.070, 0.486, 1.0), (0.949, 0.094, 0.224))
 
     def _combo_tint(self, combo_index: int) -> tuple[float, float, float]:
-        # Precedence — stable AND lazer at DEFAULT settings ("beatmap skin/
-        # colours" enabled in both games): the MAP's own [Colours] wins when
-        # the .osu ships one; else the user skin's Combo1..N; else the
-        # default-skin palette; else lazer's default combo colours.
-        # The old order let a user skin's ini beat the map, so an all-red
-        # skin (e.g. 3e9449 "red theme") painted EVERY fruit red — users read
-        # that as the hyperdash cue leaking onto normal fruits ("impossible-
-        # looking" renders). Skinless path order is unchanged (map → lazer
-        # palette), keeping the certified argon output bit-identical.
+        # Precedence (owner ground truth 2026-07-22, VK_CTB1.3 + "LegenD.":
+        # stable shows WHITE fruit AND white ticks even though the map ships
+        # red [Colours] — the USER's chosen skin's own Combo1..N wins):
+        #   1. the user skin's skin.ini Combo1..N (combo_colors_custom — ONLY
+        #      a skin the user actually picked; the bundled `_default-source`
+        #      Night05 ini never qualifies, see CatchSkin.__init__),
+        #   2. the map's own [Colours],
+        #   3. any other skin-chain palette (default-skin ini / stock combos),
+        #   4. lazer's default combo colours.
+        # This is one shared source for fruits AND droplets/tiny droplets —
+        # they must never disagree (the "red slider ticks under white fruits"
+        # bug: droplets took the map red while the fruits' white overlay art
+        # made them READ as skin-white). Skinless path order is unchanged
+        # (map → lazer palette): certified argon output stays bit-identical.
         sk = self.skin
+        if sk is not None and getattr(sk, "combo_colors_custom", False):
+            return sk.combo_color(combo_index)
         cc = self.bm.combo_colors
         if cc:
             r, g, b = cc[combo_index % len(cc)]
@@ -721,6 +912,38 @@ class CatchSim:
         """Pick one of the baked seed variants so successive objects vary like
         lazer's per-object random blob seeds (deterministic per object)."""
         return self._obj_index.get(id(obj), 0) % ARGON_VARIANTS
+
+    def _banana_scale(self, obj, t_ms) -> float:
+        """lazer DrawableBanana.UpdateInitialTransforms scale animation (a
+        'roughly matches osu-stable' port in lazer itself): the banana spawns
+        at Scale·(0.6 + 1.6·RandomSingle(3)) and shrinks linearly to Scale·0.6
+        over TimePreempt — bananas visibly pop in big and settle at 0.6× a
+        fruit. Multiplies the normal object size (which already carries
+        HitObject.Scale via fruit_screen)."""
+        start = 0.6 + 1.6 * _obj_rand01(obj.time_ms, obj.x, 3)
+        p = self.preempt
+        if p <= 0:
+            return 0.6
+        u = (t_ms - (obj.time_ms - p)) / p
+        u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+        return start + (0.6 - start) * u
+
+    def _banana_angle(self, obj, t_ms) -> float:
+        """lazer DrawableBanana.Update rotation (source-verified): LERP from
+        startAngle = 180°·(RandomSingle(1)·2−1) to endAngle with series 2,
+        over TimePreempt; freely extrapolates for uncaught bananas."""
+        import math
+        a0 = (self._rand_single(obj, 1) * 2.0 - 1.0) * math.pi
+        a1 = (self._rand_single(obj, 2) * 2.0 - 1.0) * math.pi
+        p = self.preempt
+        if p <= 0:
+            return a1
+        u = (t_ms - (obj.time_ms - p)) / p
+        return a0 + (a1 - a0) * u
+
+    def _rand_single(self, obj, series: int) -> float:
+        """Stand-in for lazer's StatelessRNG.NextSingle(RandomSeed, series)."""
+        return _obj_rand01(obj.time_ms, obj.x, series)
 
     def _banana_flare_alpha(self, obj_time: int, t_ms: int) -> float:
         """ArgonBananaPiece lens-flare fade: fully visible for the first 30% of
@@ -770,13 +993,18 @@ class CatchSim:
             spin_dir = 1.0 if (seed >> 4) & 1 else -1.0
             rot = ((seed % 628) / 100.0
                    + (t_ms - obj.time_ms + self.preempt) * 0.0008 * spin_dir)
+            # lazer DrawableBanana size-over-lifetime (skin-independent — the
+            # transform sits on the drawable): spawn at 0.6+1.6·rand, settle
+            # at 0.6× a fruit over the preempt. The flare rides the piece.
+            bs = self._banana_scale(obj, t_ms)
+            d *= bs
             out.append(Sprite(x, y, d, d, texture_key="argon_pip",
                               color=(1, 1, 1, 1), rotation=rot))
             out.append(Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
                               color=(*tint, 1.0), rotation=rot, additive=True))
             fa = self._banana_flare_alpha(obj.time_ms, t_ms)
             if fa > 0.0:
-                out.append(Sprite(x, y, size * 2.2, size * 1.1,
+                out.append(Sprite(x, y, size * bs * 2.2, size * bs * 1.1,
                                   texture_key="argon_banana_flare",
                                   color=(1, 1, 1, fa), additive=True))
             return out
@@ -828,7 +1056,11 @@ class CatchSim:
         # when it ships one, else fall back to the Argon look for that kind.
         sk = self.skin
         if obj.kind in (ObjType.DROPLET, ObjType.TINY_DROPLET):
-            if not sk.has("fruit-drop"):
+            # Legacy path whenever ANY droplet art resolves (base OR overlay):
+            # stable resolves base and overlay per-FILE and independently, so a
+            # skin shipping only one of the pair must still render legacy art
+            # (the classic-default base backs a lone overlay) — never argon.
+            if not (sk.has("fruit-drop") or sk.has("fruit-drop-overlay")):
                 return self._argon_object(obj, x, y, t_ms)
             size = self.fruit_screen * (self._SKIN_DROPLET
                                         if obj.kind is ObjType.DROPLET
@@ -840,24 +1072,46 @@ class CatchSim:
             #                   (now - spawn) / (TimePreempt + 2000))
             #   start    = RandomSingle(1) * 20°   (per-object seed)
             # DrawableTinyDroplet inherits the same spin. TimePreempt/2000
-            # tick on the beatmap clock, so map them to the replay's real
-            # timeline like self.preempt already is (2000 → 2000/rate).
+            # tick on the GAMEPLAY clock, whose ms unit IS the map-time axis
+            # this sim runs on (DT/HT compress real time at playback) — so the
+            # duration is preempt + 2000 with NO rate scaling (the old ÷rate
+            # double-applied the mod, same bug as the preempt window).
             rot = 0.0
             if self.cfg.fruit_rotation:
                 start = _obj_rand01(obj.time_ms, obj.x, 1) * 0.349   # 0..20°
-                dur = self.preempt + 2000.0 / self.bm.rate           # real ms
+                dur = self.preempt + 2000.0                          # map ms
                 rot = start + 12.566 * (t_ms - (obj.time_ms - self.preempt)) / dur
             return self._base_overlay("fruit-drop", x, y, size,
                                       self._combo_tint(obj.combo_index), rot)
         if obj.kind is ObjType.BANANA:
-            if not sk.has("fruit-bananas"):
+            # Per-FILE fallthrough guard (Sofia render bug): legacy path when
+            # ANY banana art resolves — a skin shipping ONLY the -overlay
+            # (VK_CTB1.3) must compose it over the classic-default base from
+            # the fallback chain, never drop to the argon hue blobs.
+            if not (sk.has("fruit-bananas") or sk.has("fruit-bananas-overlay")):
                 return self._argon_object(obj, x, y, t_ms)
             size = self.fruit_screen * self._SKIN_BANANA
-            if self.cfg.banana_rainbow:
-                tint = _hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
-            else:
-                tint = (1.0, 0.85, 0.15)
-            return self._base_overlay("fruit-bananas", x, y, size, tint)
+            # STABLE/lazer-legacy banana tint (owner in-game reference: classic
+            # YELLOW bananas, never the rainbow): lazer DrawableBanana pins one
+            # of three yellow variants per banana (getBananaColour, seeded per
+            # object) — (255,240,0) / (255,192,0) / (214,221,28). The rainbow
+            # hue-cycle stays an ARGON-path flourish only (_argon_object still
+            # honours cfg.banana_rainbow); tinting legacy ART with it is what
+            # painted Flameneon's "grey/rainbow circles".
+            _BANANA_TINTS = ((1.0, 0.941, 0.0), (1.0, 0.753, 0.0),
+                             (0.839, 0.867, 0.110))
+            r = _obj_rand01(obj.time_ms, obj.x, 0)   # NextInt(3, seed): series 0
+            tint = _BANANA_TINTS[min(2, int(r * 3.0))]
+            # lazer DrawableBanana.Update (source-verified): rotation LERPs
+            # from one random angle to another — 180·(RandomSingle(1)·2-1) →
+            # 180·(RandomSingle(2)·2-1) — over TimePreempt (NOT the droplet
+            # +720° spin), extrapolating freely past the plane like lazer.
+            rot = 0.0
+            if self.cfg.fruit_rotation:
+                rot = self._banana_angle(obj, t_ms)
+            # size-over-lifetime: spawn big, settle at 0.6× (lazer/stable)
+            size *= self._banana_scale(obj, t_ms)
+            return self._base_overlay("fruit-bananas", x, y, size, tint, rot)
         # FRUIT
         if not sk.has(sk.fruit_key(obj.combo_index)):
             return self._argon_object(obj, x, y, t_ms)
@@ -892,7 +1146,13 @@ class CatchSim:
         return out
 
     def _base_overlay(self, base_key, x, y, size, tint, rot=0.0) -> list[Sprite]:
-        out = [Sprite(x, y, size, size, texture_key=base_key, color=(*tint, 1.0), rotation=rot)]
+        # Base and overlay resolve INDEPENDENTLY (stable per-file fallback):
+        # either may be missing — draw whichever exists. An overlay-only skin
+        # (base unresolvable even via the default chain) still shows its ring.
+        out: list[Sprite] = []
+        if self.skin.has(base_key):
+            out.append(Sprite(x, y, size, size, texture_key=base_key,
+                              color=(*tint, 1.0), rotation=rot))
         ov = f"{base_key}-overlay"
         if self.skin.has(ov):
             out.append(Sprite(x, y, size, size, texture_key=ov, color=(1, 1, 1, 1), rotation=rot))
@@ -1162,7 +1422,8 @@ class CatchSim:
         sk = self.skin
         if banana:
             tint = (1.0, 0.85, 0.15)
-            if sk is not None and sk.has("fruit-bananas"):
+            if sk is not None and (sk.has("fruit-bananas")
+                                   or sk.has("fruit-bananas-overlay")):
                 sprites = self._base_overlay("fruit-bananas", x, y, size, tint)
                 for sp in sprites:
                     r, g, b, al = sp.color
@@ -1185,21 +1446,91 @@ class CatchSim:
                 Sprite(x, y, d, d, texture_key=f"argon_fruit_{v}",
                        color=(*tint, alpha), additive=True)]
 
-    def _catch_explosions(self, t_ms) -> list[Sprite]:
+    def _legacy_hit_lighting(self, t_ms, scx) -> list[Sprite]:
+        """STABLE hit lighting on legacy-skinned renders — exact port of lazer
+        LegacyHitExplosion (Skinning/Legacy/LegacyHitExplosion.cs), which is
+        itself the stable behaviour: every CAUGHT palpable object (fruit,
+        droplet, banana — Catcher.OnNewResult fires addLighting for any hit
+        when HitLighting is on; stable defaults it ON) flashes the CLASSIC
+        default skin's scoreboard-explosion sprites at the caught plate
+        offset, tinted the object's accent colour, additive, riding the
+        catcher:
+          · beam  (explosion1 = scoreboard-explosion-2, rotated -90 = a
+            VERTICAL streak): non-droplets only; x-scale 1 → 16·s over 160 ms
+            Easing.Out, y 0.9 → 1.1; FadeOutFromOne(300);
+            s = clamp(comboAtJudgement/200, 0.35, 1.125)
+          · puff  (explosion2 = scoreboard-explosion-1): scale (0.9, 1) →
+            (0.9, 1.3) over 500 ms Easing.Out; FadeOutFromOne(700)
+        Container Scale 0.5; offset clamped inside the catch range. Textures
+        come from the DEFAULT skin dir only (lazer: DefaultClassicSkin —
+        never the user skin), loaded as catch_light_beam / catch_light_puff."""
+        sk = self.skin
+        if sk is None or not sk.has("catch_light_puff"):
+            return []
+        out: list[Sprite] = []
+        up = self.unit_px
+        # texture logical sizes → osu units via the ×0.5 container scale
+        puff = sk.textures["catch_light_puff"]      # 39×105 logical (w×h swap below)
+        beam = sk.textures.get("catch_light_beam")
+        ph, pw = puff.shape[:2]
+        _BANANA_TINTS = ((1.0, 0.941, 0.0), (1.0, 0.753, 0.0),
+                         (0.839, 0.867, 0.110))
+        # PERF: bisect the 700ms live window out of the (time-sorted) events
+        times = getattr(self, "_light_times", None)
+        if times is None:
+            self._light_events.sort(key=lambda e: e[0])
+            times = self._light_times = [e[0] for e in self._light_events]
+        lo = bisect_left(times, t_ms - 700)
+        hi = bisect_right(times, t_ms)
+        for ct, off, kind, ci, cmb, ox in self._light_events[lo:hi]:
+            age = t_ms - ct
+            if not (0.0 <= age <= 700.0):
+                continue
+            if kind == "banana":
+                # same tint the falling banana carried (same seed inputs)
+                r = _obj_rand01(ct, ox, 0)
+                tint = _BANANA_TINTS[min(2, int(r * 3.0))]
+            else:
+                tint = self._combo_tint(ci)
+            offc = max(-self.half, min(self.half, off))
+            x = scx + offc * up
+            # puff: rotated -90 → screen w = tex_h·yscale, h = tex_w·0.9
+            u5 = min(1.0, age / 500.0)
+            ys = 1.0 + 0.3 * (1.0 - (1.0 - u5) ** 2)        # Easing.Out(quad)
+            a2 = max(0.0, 1.0 - age / 700.0)
+            p_w = ph * ys * 0.5 * up
+            p_h = pw * 0.9 * 0.5 * up
+            out.append(Sprite(x, self.plane_y - p_h * 0.5, p_w, p_h,
+                              texture_key="catch_light_puff",
+                              color=(*tint, a2), additive=True))
+            # beam: fruits + bananas only, combo-scaled vertical streak
+            if kind != "droplet" and beam is not None and age <= 300.0:
+                bh, bw = beam.shape[:2]
+                s = min(1.125, max(0.35, cmb / 200.0))
+                u16 = min(1.0, age / 160.0)
+                xs = 1.0 + (16.0 * s - 1.0) * (1.0 - (1.0 - u16) ** 2)
+                a1 = max(0.0, 1.0 - age / 300.0)
+                b_len = bw * xs * 0.5 * up                  # vertical extent
+                b_th = bh * 1.0 * 0.5 * up                  # thickness (~0.9→1.1)
+                out.append(Sprite(x, self.plane_y - b_len * 0.5, b_th, b_len,
+                                  texture_key="catch_light_beam",
+                                  color=(*tint, a1), additive=True))
+        return out
+
+    def _catch_explosions(self, t_ms, scx=None) -> list[Sprite]:
         """osu!lazer ArgonHitExplosion: every caught FRUIT fires a tall,
         combo-coloured vertical glow that scales up to (1.1, 20*s) over 200ms
         (OutQuint) then retracts to (1.1, 1) over 600ms (In), plus a large faint
         glow (radius 50, colour 20% toward white). The whole thing fades out
         over 400ms. s = clamp(combo/200, 0.35, 1.125). Droplets don't explode."""
-        # SKIN HONORING: this is an ARGON element. A legacy skin (one that ships
-        # its own fruit / catcher art) has no such effect — stable just stacks the
-        # caught fruit on the plate — so firing it over a custom skin paints a
-        # glow the skin doesn't have. Skip it entirely for skinned renders;
-        # skinless stays fully Argon.
+        # SKIN HONORING: a legacy skin gets STABLE's hit lighting (the classic
+        # scoreboard-explosion flash — see _legacy_hit_lighting), NOT the
+        # Argon glow; skinless renders keep the full Argon explosion.
         sk = self.skin
         if sk is not None and (sk.has(sk.fruit_key(0))
                                or getattr(sk, "catcher_key", None) is not None):
-            return []
+            return self._legacy_hit_lighting(t_ms, scx if scx is not None
+                                             else self._sx(256.0))
         cts = getattr(self, "_catch_times", None)
         if cts is None:
             cts = self._catch_times = [c[0] for c in self._catches]

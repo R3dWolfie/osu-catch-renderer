@@ -637,7 +637,7 @@ class ArgonHud:
         self._lrun(img, "PP", right - lw, top, ARGON_LABEL_H * es, BLUE0,
                    0.95 * self.op)
 
-    def draw_key_counter(self, img, t: float, held) -> None:
+    def draw_key_counter(self, img, t: float, held, counts=None) -> None:
         """ArgonKeyCounterDisplay (STD _argon_key_overlay, ported 1:1):
         horizontal row, BottomRight at (-60, -66); per counter the
         indicator pill drops 4 px on press (60 ms OutQuint) and returns
@@ -647,6 +647,10 @@ class ArgonHud:
         generic KeyCounterActionTrigger labels)."""
         ks = self._keys
         ks.observe(t, held)
+        # authoritative press counts from the sim's replay-frame timeline
+        # (rapid taps within one video frame otherwise vanish from the count)
+        if counts is not None:
+            ks.counts = [int(c) for c in counts]
         es, lk = self.es, self.lk
         n = len(CATCH_KEY_LABELS)
         w_cell, h_cell = ARGON_KEY_W * es, ARGON_KEY_H * es

@@ -252,6 +252,9 @@ def render_core(
     rate = getattr(bm, "rate", 1.0) or 1.0
     frame_ms = 1000.0 / cfg.fps
     map_step = frame_ms * rate
+    # key-overlay input aggregation window = exactly one output frame's span
+    # of map time (rate-aware, so DT/HT taps neither smear nor vanish).
+    sim.video_step_ms = map_step
     gameplay_frames = max(1, int((gameplay_end_ms - start_ms) / map_step))
     outro_frames = max(0, int((total_end_ms - gameplay_end_ms) / frame_ms)) if cfg.show_results else 0
     n_frames = gameplay_frames + outro_frames

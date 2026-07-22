@@ -50,6 +50,7 @@ class CatchSkin:
             else None)
         self.textures: dict[str, np.ndarray] = {}
         self._load_elements()
+        self._load_hit_lighting(default_dir)
         self.combo_colors = self._load_combos()
         self._load_hyper_colors()
         # Which sprite IS the catcher for this skin (lazer version rule above);
@@ -160,6 +161,31 @@ class CatchSkin:
                 if key in self._BOOST:
                     tex = _brighten(tex, 1.9)
                 self.textures[key] = tex
+
+    def _load_hit_lighting(self, default_dir: Path | None) -> None:
+        """Catch hit-lighting textures — lazer LegacyHitExplosion takes them
+        from the CLASSIC DEFAULT skin ONLY (`skins.DefaultClassicSkin
+        .GetTexture(...)`; the user skin is deliberately never consulted), so
+        resolve them strictly from the default-skin dir (which now carries the
+        classic scoreboard-explosion art). Keys note lazer's intentional
+        sprite swap: the BEAM (explosion1) is scoreboard-explosion-2 and the
+        plate PUFF (explosion2) is scoreboard-explosion-1."""
+        if not (default_dir and Path(default_dir).is_dir()):
+            return
+        d = Path(default_dir)
+        for key, base in (("catch_light_beam", "scoreboard-explosion-2"),
+                          ("catch_light_puff", "scoreboard-explosion-1")):
+            for stem in (f"{base}@2x", base):
+                p = d / f"{stem}.png"
+                if p.is_file():
+                    tex = _rgba(p)
+                    if "@2x" in p.name:   # store at LOGICAL size for sizing
+                        im = Image.fromarray(tex).resize(
+                            (max(1, tex.shape[1] // 2),
+                             max(1, tex.shape[0] // 2)), Image.LANCZOS)
+                        tex = np.array(im)
+                    self.textures[key] = tex
+                    break
 
     def _load_combos(self) -> list[tuple[float, float, float]]:
         # combo_colors_custom: True only when the combos came from the

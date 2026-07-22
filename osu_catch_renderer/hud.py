@@ -120,8 +120,33 @@ class DanserHud:
         # used only as a colour source — its art sits inside a largely
         # transparent, faintly-alpha'd canvas, so it can't be registered against
         # the fill reliably; we draw a clean track instead (see _draw_scorebar).
-        self.grades = {g: self._load(f"ranking-{g}", int(H * 0.060))
-                       for g in ("X", "XH", "S", "SH", "A", "B", "C", "D")}
+        #
+        # LIVE grade badge — owner decision 2026-07-22: STRICTLY the user
+        # skin's own ranking art, never the default skin's (a skin without
+        # ranking icons shows NO live badge and the score/acc/pie block lays
+        # out without the gap). Stable draws ranking-{g}-SMALL next to the
+        # accuracy — prefer that art at NATIVE logical size × H/768 (the same
+        # rule as every legacy HUD sprite; the old load squashed the BIG
+        # results-screen ranking-* into a fixed 0.060H box). A skin shipping
+        # only the big art gets it scaled to the stable small-badge height.
+        # Scaled ONCE here — per-frame resizes were part of the jitter.
+        self.grades = {}
+        _k768 = H / 768.0
+        for g in ("X", "XH", "S", "SH", "A", "B", "C", "D"):
+            gim = self._load_native(f"ranking-{g}-small", default_ok=False)
+            if gim is not None:
+                gw = max(1, int(round(gim.width * _k768)))
+                gh = max(1, int(round(gim.height * _k768)))
+                if (gw, gh) != gim.size:
+                    gim = gim.resize((gw, gh), Image.LANCZOS)
+            else:
+                big = self._load_native(f"ranking-{g}", default_ok=False)
+                if big is not None and big.height > 0:
+                    gh = max(1, int(round(40 * _k768)))   # stable -small height
+                    gim = big.resize(
+                        (max(1, int(big.width * gh / big.height)), gh),
+                        Image.LANCZOS)
+            self.grades[g] = gim
         self.mod_imgs = self._mods(meta.mods, int(H * 0.052))
         # danser-style client badge: mark osu!stable replays (game_version < 30M)
         if 0 < getattr(meta, "game_version", 0) < 30000000:
@@ -248,15 +273,37 @@ class DanserHud:
             ah.draw_progress(img, t)
 
         if _on("show_key_counter"):
-            x = float(getattr(scene, "catcher_x", 0.0))
-            dashing = bool(getattr(scene, "dashing", False))
-            dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
-            self._kc_prev_x = x
-            dead = 0.05
-            ah.draw_key_counter(img, t, (dx < -dead, dx > dead, dashing))
+            held, counts = self._input_from_scene(scene)
+            ah.draw_key_counter(img, t, held, counts=counts)
+
+        if _on("show_mods"):
+            # below the argon accuracy + pp block (pp bottom ≈ 102 lazer
+            # units; see argon_hud.draw_pp) — right-aligned with them.
+            from .argon_hud import ARGON_ACC_POS
+            right = int((ah.ui_w_l + ARGON_ACC_POS[0] * ah.es) * ah.lk)
+            top = int(115.0 * ah.es * ah.lk)
+            self._draw_mod_icons(img, t, right, top)
 
         self._draw_watermark(img)
         return np.asarray(img)
+
+    def _input_from_scene(self, scene):
+        """(held, counts) for the key overlay. The sim now supplies REPLAY-
+        FRAME-accurate state (scene.keys_held: any press/movement within this
+        video frame's map-time interval; scene.key_counts: cumulative press
+        onsets at replay resolution) — rapid taps register on every video
+        frame they span instead of aliasing into holds, dash comes from the
+        replay's real button bit, and DT/HT are inherent (the interval is
+        map_step-sized). Fallback (overlay sims / older scenes): the legacy
+        per-video-frame dx derivation, counts=None → HUD edge-counting."""
+        kh = getattr(scene, "keys_held", None)
+        if kh is not None:
+            return tuple(kh), getattr(scene, "key_counts", None)
+        x = float(getattr(scene, "catcher_x", 0.0))
+        dashing = bool(getattr(scene, "dashing", False))
+        dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
+        self._kc_prev_x = x
+        return (dx < -0.05, dx > 0.05, dashing), None
 
 
     def _overlay_skin(self, img, scene) -> np.ndarray:
@@ -294,10 +341,14 @@ class DanserHud:
             # skin, not to Argon.
             self._draw_legacy_health(img, scene.hp, t)
         if _on("show_score") and not self.score_glyphs:
-            # skin ships no number font -> lazer's own default counters
+            # skin ships no number font -> lazer's own default counters.
+            # Grade badge only when the USER skin ships ranking art (owner
+            # rule 2026-07-22: skinned renders never invent a badge).
             ah.draw_score(img, t, scene.score)
             grade0 = None
-            if (_on("show_grade") and t >= self.first_ms and sum(scene.counts) > 0):
+            if (_on("show_grade") and t >= self.first_ms
+                    and sum(scene.counts) > 0
+                    and any(g is not None for g in self.grades.values())):
                 grade0 = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
             ah.draw_accuracy(img, t, scene.accuracy, grade=grade0)
         elif _on("show_score"):
@@ -333,13 +384,37 @@ class DanserHud:
             ax, ay = self._place("LegacyAccuracyCounter", accimg.width,
                                  accimg.height, (axd, ayd))
             self._paste(img, accimg, ax, ay)
-            self._acc_box = (ax, ay, accimg.width, accimg.height)
+            # FIXED anchor for the pie + grade badge (the "jittery top-right"
+            # bug): the accuracy counter is right-aligned, so its LEFT edge
+            # moves every frame while a 375ms roll ticks the digits through
+            # different glyph widths — and the pie/badge were anchored to it.
+            # Anchor them to the widest possible accuracy text ("100.00%")
+            # instead, computed once per glyph scale: rock-solid positions,
+            # and the badge can never collide with the accuracy digits.
+            ref_w = getattr(self, "_acc_ref_w", None)
+            if ref_w is None or getattr(self, "_acc_ref_h", None) != ah_px:
+                refimg = self._number("100.00%", accg, self._score_overlap())
+                ref_w = (max(1, int(refimg.width * ah_px / refimg.height))
+                         if refimg.height else accimg.width)
+                self._acc_ref_w, self._acc_ref_h = ref_w, ah_px
+            # A skin whose lazer layout repositions the accuracy keeps the
+            # live edge (custom layouts place the block wherever they like).
+            ax_fix = ax if ac_c is not None else W - int(17 * k) - ref_w
+            self._acc_box = (ax_fix, ay, ref_w, accimg.height)
             if (_on("show_grade") and scene.time_ms >= self.first_ms
                     and sum(scene.counts) > 0):
                 g = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
                 gim = self.grades.get({"SS": "X"}.get(g, g))
                 if gim is not None:
-                    self._paste(img, gim, ax - int(W * 0.006) - gim.width, sy)
+                    # stable: the small grade sits on the ACCURACY ROW, left
+                    # of the progress pie — fixed x/y (anchor above), art at
+                    # native size (loaded pre-scaled: no squash, no per-frame
+                    # resize). Pie geometry: 33-unit box 18 units left of the
+                    # accuracy (see _draw_song_progress_pie).
+                    k768 = self.h / 768.0
+                    bx = int(ax_fix - (18 + 33 + 8) * k768) - gim.width
+                    by = int(ay + accimg.height / 2 - gim.height / 2)
+                    self._paste(img, gim, bx, by)
         # COMBO — osu!CATCH does NOT use LegacyDefaultComboCounter: the catch
         # legacy transformer only supplies KeyCounter/SpectatorList/Leaderboard.
         # Catch's combo is LegacyCatchComboCounter, drawn ABOVE THE CATCHER and
@@ -360,11 +435,18 @@ class DanserHud:
         # skin's), labelled with catch's real inputs: left / right / dash.
         # Held = sign of catcher movement + the replay's dash bit.
         if _on("show_key_counter"):
-            x = float(getattr(scene, "catcher_x", 0.0))
-            dashing = bool(getattr(scene, "dashing", False))
-            dx = 0.0 if self._kc_prev_x is None else x - self._kc_prev_x
-            self._kc_prev_x = x
-            self._draw_key_overlay(img, (dx < -0.05, dx > 0.05, dashing))
+            held, counts = self._input_from_scene(scene)
+            self._draw_key_overlay(img, held, counts)
+        # MOD ICONS — stable stacks them top-right under the accuracy row
+        # (below the pie), right-aligned with the accuracy block.
+        if _on("show_mods"):
+            k768 = H / 768.0
+            ab = getattr(self, "_acc_box", None)
+            if ab is not None and ab[3] > 0:
+                m_top = int(ab[1] + ab[3] + 12 * k768)
+            else:
+                m_top = int(H * 0.140)
+            self._draw_mod_icons(img, t, W - int(17 * k768), m_top)
         # watermark (bottom-right)
         self._draw_watermark(img)
         return np.asarray(img)
@@ -400,6 +482,43 @@ class DanserHud:
             img.paste(bimg, (0, 0), bimg)
         except Exception:          # noqa: BLE001
             return
+
+    def _draw_mod_icons(self, img, t: float, right_x: int, top_y: int) -> None:
+        """In-play mod icons — STABLE semantics (these are stable replays):
+        the skin's selection-mod-<name> sprites (per-file user → default-skin
+        resolution, prepared in __init__ as self.mod_imgs + the danser-style
+        'Stable' badge), stacked top-right under the accuracy block RIGHT-TO-
+        LEFT with a slight overlap, and kept faintly visible through the whole
+        play (full alpha in the intro, settling to 0.65 as gameplay starts —
+        lazer fades them out entirely, stable does not; owner picked stable).
+        mod_imgs was previously BUILT AND NEVER DRAWN — --show-mods was a
+        silent no-op on catch, argon and skinned alike."""
+        if not self.mod_imgs:
+            return
+        a = (1.0 if t < self.first_ms
+             else 1.0 - 0.35 * min(1.0, (t - self.first_ms) / 400.0))
+        overlap = int(16 * (self.h / 768.0))
+        x_right = right_x
+        for im in self.mod_imgs:
+            sp = im
+            if a < 1.0:
+                key = ("_mod_faded", id(im))
+                cache = getattr(self, "_mod_fade_cache", None)
+                if cache is None:
+                    cache = self._mod_fade_cache = {}
+                sp = cache.get(key)
+                if sp is None:
+                    sp = im.copy()
+                    sp.putalpha(sp.getchannel("A").point(
+                        lambda v: int(v * 0.65)))
+                    cache[key] = sp
+                if a > 0.66:   # still fading in the first 400ms: exact alpha
+                    sp = im.copy()
+                    sp.putalpha(sp.getchannel("A").point(
+                        lambda v, _a=a: int(v * _a)))
+            self._paste(img, sp, x_right - sp.width, top_y)
+            x_right -= sp.width - overlap
+        return
 
     def _draw_watermark(self, img) -> None:
         wm = getattr(self.cfg, "watermark", "") if self.cfg else ""
@@ -801,7 +920,7 @@ class DanserHud:
             cx, cy = self.w / 2.0, self.h * 0.45
         self._paste(img, txt, int(cx - tw / 2), int(cy - th / 2))
 
-    def _draw_key_overlay(self, img, held) -> None:
+    def _draw_key_overlay(self, img, held, counts=None) -> None:
         """LEGACY key overlay. Catch's three inputs are LEFT / RIGHT / DASH — the
         borrowed Argon counter labelled them B1/B2/B3, which is std/mania naming
         and simply wrong here. Press counts are edge-counted from the held states
@@ -825,9 +944,16 @@ class DanserHud:
         like stable. No glyphs at all (Argon/skinless) -> the unchanged white
         box + dark lazer glyph."""
         labels = ("B1", "B2", "B3")
-        for i in range(3):
-            if held[i] and not self._kc_held_prev[i]:
-                self._kc_counts[i] += 1
+        # Row mapping (unchanged, catch's three real inputs): B1 = move left,
+        # B2 = move right, B3 = dash. `counts` = the sim's replay-resolution
+        # press onsets (authoritative — tap-spam races up like stable's
+        # overlay); None -> legacy per-video-frame edge counting fallback.
+        if counts is not None:
+            self._kc_counts = [int(counts[0]), int(counts[1]), int(counts[2])]
+        else:
+            for i in range(3):
+                if held[i] and not self._kc_held_prev[i]:
+                    self._kc_counts[i] += 1
         self._kc_held_prev = (bool(held[0]), bool(held[1]), bool(held[2]))
 
         W, H = self.w, self.h

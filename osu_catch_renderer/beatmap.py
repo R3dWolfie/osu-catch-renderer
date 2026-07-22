@@ -29,7 +29,8 @@ class BeatmapParseError(RuntimeError):
     pass
 
 
-def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False) -> CatchBeatmap:
+def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False,
+                  position_offsets: bool = True) -> CatchBeatmap:
     text = path.read_text(encoding="utf-8", errors="replace")
     sections = _split_sections(text)
 
@@ -65,12 +66,23 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False) -> CatchBea
     rate = 1.5 if dt else (0.75 if ht else 1.0)
 
     timing = _parse_timing(sections.get("TimingPoints", ""))
-    # osu!catch position offsets (banana x + tiny-droplet +-20 XOffset) need the
-    # RNG consumed in osu's EXACT object order, which requires bit-exact
-    # tiny/droplet/banana generation — any mismatch desyncs the RNG and makes
-    # tiny offsets random-wrong (worse than no offset). Disabled until the
-    # nested generation is verified bit-exact. Set RNG_SEED-seeded rng to enable.
+    # osu!catch position offsets — CatchBeatmapProcessor.ApplyPositionOffsets
+    # (both stable and lazer run this in beatmap conversion): banana x =
+    # NextDouble()*512, tiny-droplet XOffset = clamp(Next(-20,20), field), and
+    # under HardRock the per-CIRCLE applyHardRockOffset chain (the fix for the
+    # "end-of-map combo mismatch": an HR stable replay plays OFFSET fruit
+    # positions, so simulating the un-offset .osu x's put misses in the wrong
+    # places — NoMyDarknesss/'clarity rmx' showed 4 phantom misses, max combo
+    # 159 vs the header's 310). Bit-exact only when our nested generation
+    # matches osu's counts (true on verified maps; a count drift desyncs the
+    # stream and degrades ONLY these cosmetic/±20 offsets — the count
+    # reconcile in scene.py still anchors judgements). `position_offsets=False`
+    # (or R3D_CATCH_NO_POSOFFSETS=1) restores the pre-offset stream — the
+    # certified-argon identity kill-switch.
+    import os
     rng = None
+    if position_offsets and not os.environ.get("R3D_CATCH_NO_POSOFFSETS"):
+        rng = LegacyRandom(RNG_SEED)
     objects = _parse_hit_objects(
         sections.get("HitObjects", ""),
         timing=timing,
@@ -151,6 +163,12 @@ def _parse_hit_objects(block: str, *, timing, slider_mult, tick_rate, hr, lazer=
     out: list[CatchObject] = []
     combo_index = -1  # incremented to 0 on the first new-combo
     started = False
+    # applyHardRockOffset chain state (CatchBeatmapProcessor): the previous
+    # object's (possibly already-offset) x and start time. Only top-level
+    # CIRCLE fruits receive HR offsets; juice streams update the chain state
+    # with stable's two known bugs, faithfully ported (see _slider last-pos).
+    last_pos: float | None = None
+    last_t = 0.0
 
     for line in block.splitlines():
         line = line.strip()
@@ -169,17 +187,87 @@ def _parse_hit_objects(block: str, *, timing, slider_mult, tick_rate, hr, lazer=
             combo_index += 1
 
         if typ & _TYPE_CIRCLE:
-            out.append(CatchObject(time, x, ObjType.FRUIT, combo_index, is_new))
+            xe = x
+            if rng is not None and hr:
+                xe, last_pos, last_t = _hard_rock_offset(x, float(time),
+                                                         last_pos, last_t, rng)
+                xe = _clamp(xe, 0.0, 512.0)   # CatchHitObject.EffectiveX clamp
+            out.append(CatchObject(time, xe, ObjType.FRUIT, combo_index, is_new))
         elif typ & _TYPE_SLIDER:
             out.extend(_slider_objects(
                 f, x, time, combo_index, is_new,
                 timing=timing, slider_mult=slider_mult, tick_rate=tick_rate, hr=hr,
                 lazer=lazer, rng=rng,
             ))
+            if rng is not None and hr:
+                # lazer `case JuiceStream:` — two stable bugs kept verbatim:
+                # lastPosition = OriginalX + LAST CONTROL POINT x (the raw
+                # curve point, NOT the computed path end), and lastStartTime =
+                # the stream's START time (not its end).
+                last_pos = _last_curve_x(f[5], x) if len(f) > 5 else x
+                last_t = float(time)
         elif typ & _TYPE_SPINNER:
             end = int(float(f[5])) if len(f) > 5 else time + 1000
             out.extend(_banana_shower(time, end, combo_index, is_new, rng=rng))
     return out
+
+
+def _last_curve_x(curve: str, x0: float) -> float:
+    """The slider's last raw control point x (absolute osu px). lazer:
+    `juiceStream.OriginalX + Path.ControlPoints[^1].Position.X` — control
+    points are stored head-relative, so this is simply the last `px:py`
+    token's x; a pointless curve falls back to the head x."""
+    last = x0
+    for p in curve.split("|")[1:]:
+        if ":" in p:
+            try:
+                last = float(p.split(":", 1)[0])
+            except ValueError:
+                continue
+    return last
+
+
+def _hard_rock_offset(x: float, t: float, last_pos: float | None,
+                      last_t: float, rng) -> tuple[float, float | None, float]:
+    """osu!lazer CatchBeatmapProcessor.applyHardRockOffset, exact port
+    (itself a faithful reproduction of stable's HR offset chain, including
+    the int-truncated timeDiff). Returns (offset_x, last_pos', last_t')."""
+    pos = x
+    if last_pos is None:
+        return pos, pos, t
+    position_diff = pos - last_pos
+    time_diff = int(t - last_t)          # stable bug: int truncation, kept
+    if time_diff > 1000:
+        return pos, pos, t
+    if position_diff == 0.0:
+        pos = _apply_random_offset(pos, time_diff / 4.0, rng)
+        return pos, last_pos, last_t     # stable bug: chain state NOT advanced
+    if abs(position_diff) < time_diff / 3.0:
+        pos = _apply_offset(pos, position_diff)
+    return pos, pos, t
+
+
+def _apply_random_offset(position: float, max_offset: float, rng) -> float:
+    """applyRandomOffset: random direction, magnitude min(20, Next(0, max)),
+    clamped inside the playfield by flipping direction at the walls."""
+    right = rng.next_bool()
+    # LegacyRandom.Next(double, double) == (int)(lo + NextDouble()*(hi-lo)) —
+    # the DOUBLE overload (maxOffset stays fractional inside the multiply).
+    rand = min(20.0, float(rng.next_range(0.0, max(0.0, max_offset))))
+    if right:
+        return position + rand if position + rand <= 512.0 else position - rand
+    return position - rand if position - rand >= 0.0 else position + rand
+
+
+def _apply_offset(position: float, amount: float) -> float:
+    """applyOffset: shift by `amount` only if the result stays in-field."""
+    if amount > 0.0:
+        if position + amount < 512.0:
+            position += amount
+    else:
+        if position + amount > 0.0:
+            position += amount
+    return position
 
 
 def _clamp(v, lo, hi):

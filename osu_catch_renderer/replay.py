@@ -27,6 +27,15 @@ def _dashing(ev) -> bool:
 
     Newer osrparse exposes ReplayEventCatch.dashing (bool). Older builds carry
     a `keys` int/flag — any nonzero key means a button (dash) is held.
+
+    NOTE: osrparse 7.x derives `dashing` with an EXACT `keys == 1` compare,
+    but stable writes the buttons field as a ReplayButtonState BITMASK and
+    real catch replays carry extra bits (observed: 17 = Left1|Smoke on a
+    full dash-hold play, which osrparse reads as `dashing=False` for every
+    frame — the "dash never pressed" overlay bug). parse_replay therefore
+    prefers the RAW buttons stream (`_raw_button_states`, dash = Left1 bit,
+    exactly stable's `buttonState & Left1` test); this helper is the
+    fallback when the raw stream can't be aligned.
     """
     d = getattr(ev, "dashing", None)
     if isinstance(d, bool):
@@ -36,6 +45,61 @@ def _dashing(ev) -> bool:
         return int(keys) != 0
     except (TypeError, ValueError):
         return bool(keys)
+
+
+def _raw_button_states(path: Path) -> list[int] | None:
+    """The raw per-frame buttons ints, aligned 1:1 with osrparse's
+    `replay_data` (same leading-sentinel skip rule; the RNG-seed tail frame is
+    kept, as osrparse keeps it). None on any decode problem — callers fall
+    back to osrparse's own (broken-for-bitmasks) dashing field."""
+    try:
+        data = Path(path).read_bytes()
+        off = 0
+
+        def _skip_string() -> None:
+            nonlocal off
+            tag = data[off]
+            off += 1
+            if tag == 0x00:
+                return
+            if tag != 0x0b:
+                raise ValueError(f"bad string tag {tag}")
+            length = shift = 0
+            while True:
+                byte = data[off]
+                off += 1
+                length |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            off += length
+
+        off += 1 + 4                   # mode, game version
+        _skip_string(); _skip_string(); _skip_string()
+        off += 2 * 6 + 4 + 2 + 1 + 4   # counts, score, combo, perfect, mods
+        _skip_string()                 # life bar
+        off += 8                       # timestamp
+        rlen = struct.unpack_from("<i", data, off)[0]
+        off += 4
+        raw = lzma.decompress(data[off:off + rlen],
+                              format=lzma.FORMAT_AUTO).decode("ascii", "replace")
+        out: list[int] = []
+        groups = raw.rstrip(",").split(",")
+        for i, group in enumerate(groups):
+            if not group:
+                continue
+            fields = group.split("|")
+            if len(fields) < 4:
+                return None
+            if int(fields[0]) == _SEED_DELTA and i == len(groups) - 1:
+                continue               # RNG-seed tail — osrparse drops it too
+            if (i < 2 and float(fields[1]) == 256.0
+                    and float(fields[2]) == -500.0):
+                continue               # the sentinels osrparse strips
+            out.append(int(float(fields[3])))
+        return out
+    except Exception:  # noqa: BLE001 — fall back to osrparse's field
+        return None
 
 
 def _recover_leadin_offset(path: Path) -> int:
@@ -134,7 +198,14 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
     # time (DT/HT do not compress them), so they line up 1:1 with beatmap
     # object times.
     t = _recover_leadin_offset(path)
-    for ev in r.replay_data or []:
+    # Raw buttons stream (dash = Left1 BIT, stable semantics) — osrparse 7.x
+    # compares the whole bitmask == 1 and reports dashing=False whenever any
+    # other bit rides along (observed 17 = Left1|Smoke). Aligned by index;
+    # any mismatch falls back to osrparse's field for the whole replay.
+    zs = _raw_button_states(path)
+    evs = r.replay_data or []
+    use_z = zs is not None and len(zs) == len(evs)
+    for idx, ev in enumerate(evs):
         delta = int(getattr(ev, "time_delta", 0))
         if delta == _SEED_DELTA:
             continue  # RNG seed frame, not a real position
@@ -142,7 +213,8 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         x = getattr(ev, "x", None)
         if x is None:
             continue  # non-positional frame
-        frames.append(CatchFrame(time_ms=max(t, 0), x=float(x), dashing=_dashing(ev)))
+        dash = ((zs[idx] & 1) != 0) if use_z else _dashing(ev)
+        frames.append(CatchFrame(time_ms=max(t, 0), x=float(x), dashing=dash))
     frames.sort(key=lambda f: f.time_ms)
 
     # osu!catch accuracy: every caught object (fruit / large droplet /

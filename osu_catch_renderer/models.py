@@ -180,6 +180,13 @@ class SceneState:
     catcher_px: float | None = None   # catcher centre x, SCREEN px
     plane_y_px: float | None = None   # catch plane y, SCREEN px
     pf_unit_px: float | None = None   # screen px per osu playfield unit
+    # Key-overlay input state at REPLAY-FRAME resolution (CatchSim.input_state):
+    # keys_held = (left, right, dash) held anywhere within this video frame's
+    # map-time interval; key_counts = cumulative press onsets. None on paths
+    # that don't fill them — the HUD then falls back to its per-video-frame
+    # dx derivation (which aliases rapid taps; see scene._build_inputs).
+    keys_held: tuple | None = None
+    key_counts: tuple | None = None
 
 
 # osu!catch geometry constants -------------------------------------------------
