@@ -148,9 +148,18 @@ class DanserHud:
                         Image.LANCZOS)
             self.grades[g] = gim
         self.mod_imgs = self._mods(meta.mods, int(H * 0.052))
-        # danser-style client badge: mark osu!stable replays (game_version < 30M)
+        # danser-style client badge: mark osu!stable replays (game_version < 30M).
+        # Kept as the LAST mod_imgs entry (leftmost in the right-to-left stack)
+        # and ALSO remembered on its own: the skinned layout separates the pill
+        # from the icon stack with a clean gap (see _draw_mod_icons) — the
+        # 16-unit stable overlap between the rectangular pill and a circular
+        # selection-mod icon left only an unreadable sliver of the icon poking
+        # out of the pill's right edge (the "mini-chip" of the 2026-07-22
+        # top-right jumble report).
+        self.client_badge = None
         if 0 < getattr(meta, "game_version", 0) < 30000000:
-            self.mod_imgs.append(self._text_badge("Stable", int(H * 0.052)))
+            self.client_badge = self._text_badge("Stable", int(H * 0.052))
+            self.mod_imgs.append(self.client_badge)
         self.font = _font(int(H * 0.024))
         self.font_small = _font(int(H * 0.020))
         self.font_combo = _font(int(H * 0.072))   # PIL fallback for combo glyphs
@@ -420,18 +429,29 @@ class DanserHud:
             # live edge (custom layouts place the block wherever they like).
             ax_fix = ax if ac_c is not None else W - int(17 * k) - ref_w
             self._acc_box = (ax_fix, ay, ref_w, accimg.height)
+            # ROW 2 GEOMETRY — all FIXED for the whole render (anchored on the
+            # 100.00% reference width, so nothing moves as digits roll): the
+            # song-progress pie immediately LEFT of the acc block with a small
+            # fixed gap, the grade badge (user-skin ranking art only)
+            # immediately LEFT of the pie with the same gap, both vertically
+            # centred on the acc row. Replaces the old 18+33+8-unit badge
+            # offset, which hardcoded the pie geometry a second time and read
+            # as the badge floating with a big gap (2026-07-22 report).
+            k768 = self.h / 768.0
+            gap8 = max(2, int(8 * k768))
+            pie_box = max(8, int(33 * k768))
+            pie_x = ax_fix - gap8 - pie_box
+            pie_y = int(ay + accimg.height / 2 - pie_box / 2)
+            self._pie_xy = (pie_x, pie_y)
             if (_on("show_grade") and scene.time_ms >= self.first_ms
                     and sum(scene.counts) > 0):
                 g = _catch_grade(scene.accuracy * 100.0, scene.counts[4])
                 gim = self.grades.get({"SS": "X"}.get(g, g))
                 if gim is not None:
                     # stable: the small grade sits on the ACCURACY ROW, left
-                    # of the progress pie — fixed x/y (anchor above), art at
-                    # native size (loaded pre-scaled: no squash, no per-frame
-                    # resize). Pie geometry: 33-unit box 18 units left of the
-                    # accuracy (see _draw_song_progress_pie).
-                    k768 = self.h / 768.0
-                    bx = int(ax_fix - (18 + 33 + 8) * k768) - gim.width
+                    # of the progress pie — art at native size (loaded
+                    # pre-scaled: no squash, no per-frame resize).
+                    bx = pie_x - gap8 - gim.width
                     by = int(ay + accimg.height / 2 - gim.height / 2)
                     self._paste(img, gim, bx, by)
         # COMBO — osu!CATCH does NOT use LegacyDefaultComboCounter: the catch
@@ -448,7 +468,8 @@ class DanserHud:
         if _on("show_progress"):
             self._draw_song_progress_pie(img, int(scene.time_ms),
                                          getattr(self, "_acc_box",
-                                                 (W - 10, 10, 0, 0)))
+                                                 (W - 10, 10, 0, 0)),
+                                         xy=getattr(self, "_pie_xy", None))
             self._draw_argon_song_progress(img, int(scene.time_ms))
         # KEY COUNTER — the LEGACY inputoverlay (skin's own, else the default
         # skin's), labelled with catch's real inputs: left / right / dash.
@@ -456,16 +477,30 @@ class DanserHud:
         if _on("show_key_counter"):
             held, counts = self._input_from_scene(scene)
             self._draw_key_overlay(img, held, counts)
-        # MOD ICONS — stable stacks them top-right under the accuracy row
-        # (below the pie), right-aligned with the accuracy block.
+        # MOD ICONS — stable stacks them top-right under the accuracy row,
+        # right-aligned with the accuracy block. ROW 3 clears the WHOLE of
+        # row 2 (acc digits, pie AND grade badge): the clearance counts the
+        # tallest loaded ranking art even while no badge is up yet, so the
+        # row never shifts when the badge appears mid-play — fixed anchors,
+        # zero overlap (the old top ignored the pie/badge heights and let
+        # tall ranking art touch the mod row).
         if _on("show_mods"):
             k768 = H / 768.0
             ab = getattr(self, "_acc_box", None)
             if ab is not None and ab[3] > 0:
-                m_top = int(ab[1] + ab[3] + 12 * k768)
+                bh_max = getattr(self, "_grade_h_max", None)
+                if bh_max is None:
+                    bh_max = max((g.height for g in self.grades.values()
+                                  if g is not None), default=0)
+                    self._grade_h_max = bh_max
+                row2_mid = ab[1] + ab[3] / 2.0
+                half = max(ab[3] / 2.0, max(8, int(33 * k768)) / 2.0,
+                           bh_max / 2.0)
+                m_top = int(row2_mid + half + 12 * k768)
             else:
                 m_top = int(H * 0.140)
-            self._draw_mod_icons(img, t, W - int(17 * k768), m_top)
+            self._draw_mod_icons(img, t, W - int(17 * k768), m_top,
+                                 pill_gap=max(2, int(8 * k768)))
         # watermark (bottom-right)
         self._draw_watermark(img)
         return np.asarray(img)
@@ -502,7 +537,8 @@ class DanserHud:
         except Exception:          # noqa: BLE001
             return
 
-    def _draw_mod_icons(self, img, t: float, right_x: int, top_y: int) -> None:
+    def _draw_mod_icons(self, img, t: float, right_x: int, top_y: int,
+                        pill_gap: int | None = None) -> None:
         """In-play mod icons — STABLE semantics (these are stable replays):
         the skin's selection-mod-<name> sprites (per-file user → default-skin
         resolution, prepared in __init__ as self.mod_imgs + the danser-style
@@ -511,7 +547,14 @@ class DanserHud:
         play (full alpha in the intro, settling to 0.65 as gameplay starts —
         lazer fades them out entirely, stable does not; owner picked stable).
         mod_imgs was previously BUILT AND NEVER DRAWN — --show-mods was a
-        silent no-op on catch, argon and skinned alike."""
+        silent no-op on catch, argon and skinned alike.
+
+        `pill_gap` (skinned layout only; None = exact legacy behaviour for the
+        argon caller): the 'Stable' pill at the end of the stack steps a clean
+        `pill_gap` px LEFT of the icons instead of overlapping the last one —
+        the 16-unit stable overlap between the opaque pill and a circular mod
+        icon read as a mystery second circle with an unreadable dark sliver
+        ('mini-chip') poking out of the pill (2026-07-22 top-right jumble)."""
         if not self.mod_imgs:
             return
         a = (1.0 if t < self.first_ms
@@ -535,6 +578,10 @@ class DanserHud:
                     sp = im.copy()
                     sp.putalpha(sp.getchannel("A").point(
                         lambda v, _a=a: int(v * _a)))
+            if (pill_gap is not None and x_right != right_x
+                    and im is getattr(self, "client_badge", None)):
+                # the pill after a non-empty icon stack: clean gap, no overlap
+                x_right -= overlap + pill_gap
             self._paste(img, sp, x_right - sp.width, top_y)
             x_right -= sp.width - overlap
         return
@@ -813,11 +860,16 @@ class DanserHud:
                    fill=(*col, 255))
         img.paste(Image.alpha_composite(sub, layer).convert("RGB"), (bx0, by0))
 
-    def _draw_song_progress_pie(self, img, t_ms: int, acc_box) -> None:
+    def _draw_song_progress_pie(self, img, t_ms: int, acc_box,
+                                xy: tuple[int, int] | None = None) -> None:
         """LegacySongProgress — a 33x33 CIRCULAR PIE (not a bar, and with NO time
         text; SongProgressInfo is Default/Argon only). 2px white ring, pie at 0.92
         of the box, 4px centre dot. Gameplay = white @60% counting up; before the
-        first object it mirrors and counts DOWN in yellow-green."""
+        first object it mirrors and counts DOWN in yellow-green.
+
+        `xy`: precomputed default top-left (the skinned single-player layout's
+        fixed row-2 anchor). None (overlay-board path) keeps the legacy
+        derivation from acc_box. A skin's own lazer layout still wins."""
         span = max(1, self.last_ms - self.first_ms)
         frac = max(0.0, min(1.0, (t_ms - self.first_ms) / span))
         k = self.h / 768.0
@@ -825,10 +877,14 @@ class DanserHud:
         if c is not None:
             k *= c.scale[1]
         box = max(8, int(33 * k))
-        # default: vertically centred on the accuracy counter, 18 units left of it
-        ax, ay, aw, ah = acc_box
-        dx = int(ax - 18 * (self.h / 768.0) - box)
-        dy = int(ay + ah / 2 - box / 2)
+        if xy is not None:
+            dx, dy = int(xy[0]), int(xy[1])
+        else:
+            # default: vertically centred on the accuracy counter, 18 units
+            # left of it
+            ax, ay, aw, ah = acc_box
+            dx = int(ax - 18 * (self.h / 768.0) - box)
+            dy = int(ay + ah / 2 - box / 2)
         x, y = self._place("LegacySongProgress", box, box, (dx, dy))
         d = ImageDraw.Draw(img)
         intro = t_ms < self.first_ms
@@ -972,21 +1028,26 @@ class DanserHud:
         # catcher position -> screen: track the catcher like stable/lazer's
         # LegacyCatchComboCounter. SceneState carries the geometry
         # (catcher_px / plane_y_px / pf_unit_px).
-        # PLACEMENT: lazer's CatcherArea builds the CatchComboDisplay with
-        # Origin=Centre + Margin{Bottom=350} anchored at the area's TOP (the
-        # catch plane) — the bottom margin shifts the layout centre 175 units
-        # UP, i.e. the counter is centred 175 playfield units ABOVE the catch
-        # plane, at Catcher.X. The old code ADDED 53 units (screen-y grows
-        # downward), parking the number BELOW the plane, on the catcher body
-        # — the "combo counter in the platter" bug. 175 units reads a touch
-        # floaty against real captures at 720p, so 120 is used: clearly above
-        # the plate + any pile, still visually attached to the catcher.
+        # PLACEMENT — verified against lazer source 2026-07-22
+        # (osu.Game.Rulesets.Catch/UI/CatcherArea.cs): comboDisplay has
+        # Anchor=TopLeft (of the CatcherArea, whose top edge IS the catch
+        # plane: CatchPlayfield anchors the area BottomLeft/TopLeft),
+        # Origin=Centre, Margin{Bottom=350}. osu!framework folds margins into
+        # OriginPosition (LayoutSize/2 - (margin.Left, margin.Top)), so a
+        # bottom margin of 350 lifts the layout CENTRE 175 units: the counter
+        # is centred exactly 175 playfield units ABOVE the catch plane. X:
+        # CatcherArea.UpdateAfterChildren sets comboDisplay.X = Catcher.X
+        # every frame, unclamped — it FOLLOWS the catcher (we keep a
+        # screen-edge clamp below purely so digits never crop at the walls).
+        # An earlier eyeballed 120 sat the counter visibly LOWER than
+        # stable/lazer (player report 2026-07-22: real client shows it "a bit
+        # above the middle") — 175, the source value, restores parity.
         cx = getattr(scene, "catcher_px", None)
         py = getattr(scene, "plane_y_px", None)
         up = getattr(scene, "pf_unit_px", None)
         if cx is not None and py is not None and up:
             cx = float(cx)
-            cy = float(py) - 120.0 * float(up)
+            cy = float(py) - 175.0 * float(up)
             # keep the number fully on screen at the playfield edges
             cx = max(tw / 2.0 + 2.0, min(self.w - tw / 2.0 - 2.0, cx))
             cy = max(th / 2.0 + 2.0, min(cy, self.h - th / 2.0 - 2.0))
