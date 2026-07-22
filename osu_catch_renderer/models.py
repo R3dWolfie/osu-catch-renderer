@@ -174,6 +174,12 @@ class SceneState:
     # CatchSim.build_scene from the replay frames)
     catcher_x: float = 0.0            # catcher centre x, osu units 0..512
     dashing: bool = False             # dash key held this frame (replay)
+    # screen-space catcher geometry for the HUD's catcher-tracking combo
+    # counter (LegacyCatchComboCounter). None on paths that don't fill them
+    # (the HUD then falls back to its old fixed placement).
+    catcher_px: float | None = None   # catcher centre x, SCREEN px
+    plane_y_px: float | None = None   # catch plane y, SCREEN px
+    pf_unit_px: float | None = None   # screen px per osu playfield unit
 
 
 # osu!catch geometry constants -------------------------------------------------

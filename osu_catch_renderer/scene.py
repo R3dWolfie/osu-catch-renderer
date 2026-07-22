@@ -510,6 +510,11 @@ class CatchSim:
         s.catcher_x = float(cx)          # HUD key counter (L/R from x delta)
         s.dashing = bool(dashing)        # HUD key counter (dash key state)
         scx = self._sx(cx)
+        # screen-space catcher geometry for the HUD's catcher-tracking combo
+        # (SceneState is a snapshot — the HUD never sees the sim itself)
+        s.catcher_px = float(scx)
+        s.plane_y_px = float(self.plane_y)
+        s.pf_unit_px = float(self.unit_px)
         # Red-tint strength 0..1 with lazer's 180ms OutQuint fade in/out, so the
         # catcher/trail ramp white<->red instead of snapping to pure red.
         hyper_amt = self._hyper_amount(t_ms)
@@ -729,6 +734,23 @@ class CatchSim:
                               color=(1.0, 0.0, 0.0, 1.0), rotation=rot, additive=True))
         return out
 
+    # Skinned-object quad multipliers (× fruit_screen). SIZE PARITY RULE: a
+    # legacy sprite FILLS its quad while the Argon pieces only light a fraction
+    # of theirs — so these are chosen to match the ARGON path's measured
+    # VISIBLE diameters (the fidelity reference), not Argon's quad sizes.
+    # Measured at CS3.3/720p (fruit_screen=118.9px, typical legacy art fills
+    # ~0.94 fruit / ~0.77 droplet of its canvas):
+    #   argon fruit ≈114px visible → skin quad 1.05 → ≈112-117px  (match)
+    #   argon banana ring ≈115px  → skin quad 1.05 → ≈117px       (match)
+    #   argon droplet ≈29px       → skin quad 0.32 → ≈29px  (was 0.55 ≈50px)
+    #   argon tiny    ≈17px       → skin quad 0.19 → ≈17px  (was 0.30 ≈27px)
+    # Everything scales with CS via fruit_screen. Hyperfruit is NOT bigger —
+    # see the hyper echo in _skinned_object (was ×1.32, an invented bump).
+    _SKIN_FRUIT = 1.05
+    _SKIN_DROPLET = 0.32
+    _SKIN_TINY = 0.19
+    _SKIN_BANANA = 1.05
+
     def _skinned_object(self, obj, x, y, t_ms) -> list[Sprite]:
         # Per-element skin honoring: use the skin's sprite for this object kind
         # when it ships one, else fall back to the Argon look for that kind.
@@ -736,13 +758,14 @@ class CatchSim:
         if obj.kind in (ObjType.DROPLET, ObjType.TINY_DROPLET):
             if not sk.has("fruit-drop"):
                 return self._argon_object(obj, x, y, t_ms)
-            # lazer: large droplet (slider tick) ~ half a fruit, tiny ~ quarter
-            size = self.fruit_screen * (0.55 if obj.kind is ObjType.DROPLET else 0.30)
+            size = self.fruit_screen * (self._SKIN_DROPLET
+                                        if obj.kind is ObjType.DROPLET
+                                        else self._SKIN_TINY)
             return self._base_overlay("fruit-drop", x, y, size, self._combo_tint(obj.combo_index))
         if obj.kind is ObjType.BANANA:
             if not sk.has("fruit-bananas"):
                 return self._argon_object(obj, x, y, t_ms)
-            size = self.fruit_screen * 1.05
+            size = self.fruit_screen * self._SKIN_BANANA
             if self.cfg.banana_rainbow:
                 tint = _hue((t_ms * 0.0009 + obj.x * 0.01) % 1.0)
             else:
@@ -752,14 +775,28 @@ class CatchSim:
         if not sk.has(sk.fruit_key(obj.combo_index)):
             return self._argon_object(obj, x, y, t_ms)
         hyper = obj.hyperdash and self.cfg.show_hyperdash
-        size = self.fruit_screen * (1.32 if hyper else 1.05)
-        tint = (1.0, 0.35, 0.35) if hyper else self._combo_tint(obj.combo_index)
+        # osu!lazer: a HYPERFRUIT is the SAME size as a normal fruit — the
+        # hyper cue is a red additive echo of the same sprite at 1.2× BEHIND
+        # it (LegacyCatchHitObjectPiece.hyperSprite: Scale 1.2, Alpha 0.7,
+        # Colour red, Depth 1) — NOT a bigger fruit and NOT a red-tinted core.
+        size = self.fruit_screen * self._SKIN_FRUIT
+        tint = self._combo_tint(obj.combo_index)
         # gentle spin while falling, deterministic per fruit
         rot = 0.0
         if self.cfg.fruit_rotation:
             spin_dir = 1.0 if (int(obj.x) % 2 == 0) else -1.0
             rot = spin_dir * (t_ms - obj.time_ms + self.preempt) * 0.0011
-        return self._base_overlay(sk.fruit_key(obj.combo_index), x, y, size, tint, rot)
+        out: list[Sprite] = []
+        if hyper:
+            # Straight-alpha (not additive): our GL batch draws ALL additive
+            # sprites in a second pass ON TOP, which would wash the fruit core
+            # red — painter's order in the normal pass keeps the echo behind
+            # the opaque fruit exactly like lazer's Depth 1.
+            out.append(Sprite(x, y, size * 1.2, size * 1.2,
+                              texture_key=sk.fruit_key(obj.combo_index),
+                              color=(1.0, 0.0, 0.0, 0.7), rotation=rot))
+        out.extend(self._base_overlay(sk.fruit_key(obj.combo_index), x, y, size, tint, rot))
+        return out
 
     def _base_overlay(self, base_key, x, y, size, tint, rot=0.0) -> list[Sprite]:
         out = [Sprite(x, y, size, size, texture_key=base_key, color=(*tint, 1.0), rotation=rot)]
@@ -772,11 +809,12 @@ class CatchSim:
         """One ADDITIVE afterimage of the FULL catcher body (skin sprite, or the
         Argon bar+bumpers) at screen-x scx — the unit lazer's CatcherTrail draws
         (CatcherTrail.body = SkinnableCatcher, Blending = Additive)."""
-        if self.skin is not None and self.skin.has("fruit-catcher-idle"):
+        ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
+        if ck is not None and self.skin.has(ck):
             hb = self.catcher_w * self.skin.catcher_aspect
             return [Sprite(scx, self.plane_y + hb * 0.46 + dy,
                            self.catcher_w * scale, hb * scale,
-                           texture_key="fruit-catcher-idle",
+                           texture_key=ck,
                            color=(*rgb, alpha), additive=True)]
         from .lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
@@ -840,9 +878,11 @@ class CatchSim:
 
     def _catcher_sprites(self, x, dashing, hyper_amt=0.0, t_ms=None) -> list[Sprite]:
         # A custom skin's catcher takes priority — same layout (CS/mod-driven
-        # catcher_w), the skin supplies the sprite. The procedural Argon catcher
-        # is only the base/fallback when the skin ships no catcher.
-        if (self.skin is not None and self.skin.has("fruit-catcher-idle")
+        # catcher_w), the skin supplies the sprite (fruit-catcher-idle, or
+        # fruit-ryuuta for old-style skins — skin.catcher_key). The procedural
+        # Argon catcher is only the base/fallback when the skin ships no catcher.
+        ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
+        if (ck is not None and self.skin.has(ck)
                 and not self.force_argon_catcher):
             # lazer tints the catcher red ONLY when hyperdashing (Catcher
             # DEFAULT_HYPER_DASH_COLOUR = Color4.Red); plain dashing leaves the
@@ -851,7 +891,7 @@ class CatchSim:
             w = self.catcher_w
             h = w * self.skin.catcher_aspect
             return [Sprite(x, self.plane_y + h * 0.46, w, h,
-                           texture_key="fruit-catcher-idle", color=tint)]
+                           texture_key=ck, color=tint)]
         # osu!lazer ArgonCatcher: a white rounded catch bar (0.8 of the catcher
         # width) + a bumper at each end of the catch range + faint side lines
         # out to the screen edges. Footprint/placement unchanged (full width =
@@ -961,7 +1001,7 @@ class CatchSim:
         # skinless stays fully Argon.
         sk = self.skin
         if sk is not None and (sk.has(sk.fruit_key(0))
-                               or sk.has("fruit-catcher-idle")):
+                               or getattr(sk, "catcher_key", None) is not None):
             return []
         cts = getattr(self, "_catch_times", None)
         if cts is None:

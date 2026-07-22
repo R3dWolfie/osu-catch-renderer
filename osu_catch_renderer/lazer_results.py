@@ -1022,6 +1022,25 @@ class CatchLazerResults:
         self.creator_img = bake_text(
             f"mapped by {_clip(creator, 22)}" if creator else "",
             int(22 * k), (0.65, 0.68, 0.78))
+        # The star/diff/creator row is CENTRED in _draw_star_row — without a
+        # PIXEL budget a long diff name + "mapped by …" made the row wider
+        # than the panel, running off both card edges and pushing the star
+        # pill off the LEFT edge (char-count _clip alone doesn't bound px).
+        # Only refit when the natural bake overflows, so every fitting row
+        # stays bit-identical to the old output.
+        _row_gap = 14.0 * k
+        _row_avail = max(content_w * k - self.star_pill.width - 2.0 * _row_gap,
+                        1.0)
+        if self.diff_img.width + self.creator_img.width > _row_avail:
+            _d_budget = min(float(self.diff_img.width),
+                            max(_row_avail - self.creator_img.width,
+                                _row_avail * 0.5))
+            self.diff_img = fit_text(bm.version or "", 26.0, (0.9, 0.92, 1.0),
+                                     _d_budget / k, k)
+            _c_budget = max(_row_avail - self.diff_img.width, 1.0)
+            self.creator_img = fit_text(
+                f"mapped by {creator}" if creator else "", 22.0,
+                (0.65, 0.68, 0.78), _c_budget / k, k)
         # stats grids — catch judgments (no slider tick/end rows: catch has
         # no such concept). Judgment colours = the flank cards' palette.
         pp_txt = (f"{self.pp:.0f}" if self.pp is not None else "--")

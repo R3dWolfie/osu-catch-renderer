@@ -205,8 +205,9 @@ def render_core(
             ctex = None
             if sd and Path(sd).is_dir():
                 try:
-                    ctex = CatchSkin(Path(sd), cfg.default_skin_dir) \
-                        .textures.get("fruit-catcher-idle")
+                    _csk = CatchSkin(Path(sd), cfg.default_skin_dir)
+                    _ck = getattr(_csk, "catcher_key", None)
+                    ctex = _csk.textures.get(_ck) if _ck else None
                 except Exception:      # noqa: BLE001 — bad skin → base catcher
                     ctex = None
             if ctex is not None:

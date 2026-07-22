@@ -21,6 +21,11 @@ _ELEMENTS = {
     "fruit-pear": True, "fruit-grapes": True, "fruit-apple": True, "fruit-orange": True,
     "fruit-drop": True, "fruit-bananas": True,
     "fruit-catcher-idle": False, "fruit-catcher-kiai": False, "fruit-catcher-fail": False,
+    # legacy single-sprite catcher (pippi) — the catcher for old skins.
+    # lazer CatchLegacySkinTransformer: skin version < 2.3 uses fruit-ryuuta
+    # (LegacyCatcherOld) even when fruit-catcher-idle exists; newer skins use
+    # fruit-catcher-idle and only fall back to fruit-ryuuta when idle is absent.
+    "fruit-ryuuta": False,
 }
 
 _DEFAULT_COMBOS = [
@@ -46,7 +51,11 @@ class CatchSkin:
         self.textures: dict[str, np.ndarray] = {}
         self._load_elements()
         self.combo_colors = self._load_combos()
-        self.catcher_aspect = self._aspect("fruit-catcher-idle", 324 / 305)
+        # Which sprite IS the catcher for this skin (lazer version rule above);
+        # None = no legacy catcher → scene falls back to the Argon bar.
+        self.catcher_key = self._resolve_catcher_key()
+        self.catcher_aspect = self._aspect(self.catcher_key or "fruit-catcher-idle",
+                                           324 / 305)
 
     @staticmethod
     def _resolve_root(d: Path) -> Path:
@@ -79,6 +88,50 @@ class CatchSkin:
 
     def has(self, key: str) -> bool:
         return key in self.textures
+
+    # --- catcher resolution ---------------------------------------------------
+
+    @staticmethod
+    def _dir_has(d: Path, basename: str) -> bool:
+        return any((d / f"{basename}{s}.png").is_file() for s in ("@2x", ""))
+
+    @staticmethod
+    def _skin_version(d: Path) -> float:
+        """skin.ini [General] Version of ONE skin dir. Stable's rule: missing
+        ini / missing key = 1.0 (old); 'latest' = new."""
+        ini = d / "skin.ini"
+        if not ini.is_file():
+            return 1.0
+        try:
+            for line in ini.read_text(errors="replace").splitlines():
+                s = line.strip()
+                if s.lower().startswith("version") and ":" in s:
+                    val = s.split(":", 1)[1].strip()
+                    if val.lower() == "latest":
+                        return 99.0
+                    try:
+                        return float(val)
+                    except ValueError:
+                        return 1.0
+        except Exception:  # noqa: BLE001 — unreadable ini = old skin
+            return 1.0
+        return 1.0
+
+    def _resolve_catcher_key(self) -> str | None:
+        """The catcher sprite key, per lazer's CatchLegacySkinTransformer:
+        the FIRST dir (user skin, then default) that ships any catcher wins as
+        a unit (a user skin's ryuuta must not be beaten by the default's
+        idle); within it, version < 2.3 prefers fruit-ryuuta (LegacyCatcherOld)
+        when present, else fruit-catcher-idle, else fruit-ryuuta."""
+        for d in self.dirs:
+            has_idle = self._dir_has(d, "fruit-catcher-idle")
+            has_ryuuta = self._dir_has(d, "fruit-ryuuta")
+            if not (has_idle or has_ryuuta):
+                continue
+            if has_ryuuta and (not has_idle or self._skin_version(d) < 2.3):
+                return "fruit-ryuuta"
+            return "fruit-catcher-idle"
+        return None
 
     # --- loading --------------------------------------------------------------
 
