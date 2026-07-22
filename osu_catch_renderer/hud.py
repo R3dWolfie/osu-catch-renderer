@@ -824,22 +824,33 @@ class DanserHud:
             n = self._kc_counts[i]
             if n > 0 and glyphs:
                 # skin number font — same glyph assembly as the combo/score.
-                num = self._number(str(n), glyphs, self._combo_overlap())
+                # CACHED by (count, box size): the composed digits are pixel-
+                # identical every frame until the count changes, and the
+                # per-frame assemble + LANCZOS (x3 keys, every frame) was
+                # measurably dragging full skinned renders. PERF.
+                _cache = getattr(self, "_kc_num_cache", None)
+                if _cache is None:
+                    _cache = self._kc_num_cache = {}
+                num = _cache.get((n, ks))
+                if num is None:
+                    num = self._number(str(n), glyphs, self._combo_overlap())
+                    if num.width > 0 and num.height > 0:
+                        th = max(1, int(ks * 0.46))
+                        tw = max(1, int(num.width * th / num.height))
+                        wmax = max(1, int(ks * 0.84))
+                        if tw > wmax:        # long counts: fit the box width
+                            th = max(1, int(th * wmax / tw))
+                            tw = wmax
+                        num = num.resize((tw, th), Image.LANCZOS)
+                        amax = getattr(self, "_kc_glyph_amax", 255.0)
+                        if 0.0 < amax < 200.0:  # ghost font -> readable digits
+                            k = 230.0 / amax
+                            num.putalpha(num.getchannel("A").point(
+                                lambda v: min(255, int(v * k))))
+                    _cache[(n, ks)] = num
                 if num.width > 0 and num.height > 0:
-                    th = max(1, int(ks * 0.46))
-                    tw = max(1, int(num.width * th / num.height))
-                    wmax = max(1, int(ks * 0.84))
-                    if tw > wmax:            # long counts: fit the box width
-                        th = max(1, int(th * wmax / tw))
-                        tw = wmax
-                    num = num.resize((tw, th), Image.LANCZOS)
-                    amax = getattr(self, "_kc_glyph_amax", 255.0)
-                    if 0.0 < amax < 200.0:   # ghost font -> readable digits
-                        k = 230.0 / amax
-                        num.putalpha(num.getchannel("A").point(
-                            lambda v: min(255, int(v * k))))
-                    self._paste(img, num, x0 + (ks - tw) // 2,
-                                ky + (ks - th) // 2)
+                    self._paste(img, num, x0 + (ks - num.width) // 2,
+                                ky + (ks - num.height) // 2)
                 continue
             txt = str(n) if n > 0 else lab
             f = cf if n > 0 else lf
