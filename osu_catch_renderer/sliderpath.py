@@ -164,7 +164,7 @@ class SliderPath:
         for p in parts[1:]:
             if ":" in p:
                 px, py = p.split(":")
-                fx = 512.0 - float(px) if hr else float(px)
+                fx = float(px)
                 points.append((fx, float(py)))
         self.path = self._calc_path(type_char, points)
         self.cum = [0.0]

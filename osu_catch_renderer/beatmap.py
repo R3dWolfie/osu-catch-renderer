@@ -46,7 +46,7 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False) -> CatchBea
 
     # --- mods: difficulty adjustment + playback rate ---
     ez = bool(mods & (1 << 1))
-    hr = bool(mods & (1 << 4))   # also mirrors x in catch
+    hr = bool(mods & (1 << 4))   # catch HR: CS/AR up; NO x-mirror (catch HR does not flip)
     if ez:
         cs *= 0.5; ar *= 0.5; od *= 0.5; hp *= 0.5
     if hr:
@@ -162,8 +162,6 @@ def _parse_hit_objects(block: str, *, timing, slider_mult, tick_rate, hr, lazer=
         x = float(f[0])
         time = int(float(f[2]))
         typ = int(f[3])
-        if hr:
-            x = 512.0 - x
 
         is_new = bool(typ & _TYPE_NEW_COMBO) or not started
         started = True
@@ -358,7 +356,7 @@ class _SliderPath:
         for p in parts[1:]:
             if ":" in p:
                 px, py = p.split(":")
-                fx = 512.0 - float(px) if hr else float(px)
+                fx = float(px)
                 pts.append((fx, float(py)))
         self._poly = self._build(kind, pts)
         self._cum, self._total = self._arc_lengths(self._poly)
