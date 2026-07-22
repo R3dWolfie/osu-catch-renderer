@@ -18,6 +18,33 @@ class ObjType(Enum):
 
 
 @dataclass(frozen=True)
+class HitSample:
+    """The hitsound spec one catchable carries out of beatmap parsing —
+    the lazer `HitObject.Samples` equivalent, catch-shaped:
+
+      * kind "hit"    — a fruit (circle / juice-stream head/repeat/tail):
+        hitnormal always + whistle/finish/clap per `bits` (osu bits 2/4/8);
+        lazer JuiceStream: fruit edges carry GetNodeSamples(nodeIndex).
+      * kind "tick"   — a large droplet: lazer JuiceStream renames the
+        stream's samples to "slidertick" (Samples.Select(s.With(@"slidertick"))).
+      * kind "banana" — Banana.default_banana_samples (BananaHitSampleInfo:
+        "Gameplay/metronomelow" / "Gameplay/catch-banana", volume 100).
+
+    TINY droplets carry NO HitSample (None) — lazer's TinyDroplet is created
+    with no Samples, so a caught tiny is silent.
+
+    Zero set/index/volume mean "resolve from the active timing point at play
+    time" (stable semantics — hitsounds.py does that resolution)."""
+    bits: int = 0            # whistle/finish/clap addition bits (2/4/8)
+    normal_set: int = 0      # 0=timing point's; 1/2/3=normal/soft/drum
+    addition_set: int = 0    # 0=inherit the (resolved) normal set
+    index: int = 0           # custom sample index; 0=timing point's
+    volume: int = 0          # 0..100; 0=timing point's
+    filename: str = ""       # per-object custom file (beatmap dir), plays alone
+    kind: str = "hit"        # "hit" | "tick" | "banana"
+
+
+@dataclass(frozen=True)
 class CatchObject:
     """One catchable thing falling toward the catcher plane.
 
@@ -33,6 +60,8 @@ class CatchObject:
     new_combo: bool = False
     hyperdash: bool = False
     hyper_target_x: float | None = None
+    # hitsound spec (None = silent when caught — tiny droplets); see HitSample
+    sample: HitSample | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +89,10 @@ class CatchBeatmap:
     creator: str = ""   # mapper (the results screen's "mapped by …")
     rate: float = 1.0   # playback rate (DT/NC=1.5, HT=0.75); times already scaled
     combo_colors: list = field(default_factory=list)   # [Colours] Combo1..N (RGB)
+    # hitsound timing data (beatmap._Timing — sample_info(t) resolves the
+    # active sampleSet/sampleIndex/volume) + the [General] SampleSet default.
+    timing: object = None
+    sample_set_default: int = 1   # 1=normal 2=soft 3=drum
 
     @property
     def length_ms(self) -> int:
@@ -122,6 +155,11 @@ class RenderConfig:
     music_volume: int = 100
     general_volume: int = 100
     audio_offset_ms: int = 0            # +later / -earlier, relative to gameplay
+    # caught-object hitsounds mixed under the music (stable behaviour: every
+    # CAUGHT fruit/droplet plays its hit samples, misses play nothing).
+    # Default ON to match the game — the bot passes nothing for catch singles.
+    hitsounds: bool = True
+    hitsound_volume: int = 100          # 0..100 gain on the hitsound track
     # background (% dim 0..100; higher = darker. blur in px)
     bg_dim_intro: int = 0
     bg_dim_game: int = 70

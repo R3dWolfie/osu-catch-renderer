@@ -181,6 +181,9 @@ def render_core(
     sim_end_ms = int(death_ms) if failed else None
     sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None,
                    meta=meta, end_ms=sim_end_ms)
+    # the PRIMARY player's sim — hitsounds come from ITS caught objects even
+    # in a versus overlay (sim is rebound to CatchOverlaySim below).
+    base_sim = sim
     _overlay_gray_keys = set()
     _player_catcher_bakes = []      # [(texture_key, rgba)] grayscaled + uploaded below
     if overlay_extra:
@@ -318,7 +321,32 @@ def render_core(
         renderer.upload_texture("bg", _bg_cover(bg, w, h, cfg.bg_blur))
 
     total_dur_s = n_frames / cfg.fps
-    proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s)
+    # Caught-object hitsounds (stable behaviour; default ON): pre-mix every
+    # caught object's samples into a wall-time WAV; the encode amixes it on
+    # top of the loudnormed song (see hitsounds.py for the lazer semantics
+    # + the mania v2 loudnorm-duck fix this mirrors). Fully fail-soft — any
+    # problem leaves the song-only chain (renders unchanged).
+    hits_wav = None
+    if audio is not None and getattr(cfg, "hitsounds", True):
+        try:
+            from .hitsounds import build_hitsound_track, synth_style_for
+            objs, caught_flags = base_sim.catch_events()
+            skin_dirs = skin.dirs if skin is not None else []
+            has_custom = (skin is not None
+                          and getattr(skin, "_user_skin_dir", None) is not None)
+            bdir = osu_path.parent if osu_path is not None else audio.parent
+            hits_wav = build_hitsound_track(
+                objs, caught_flags, bm,
+                beatmap_dir=bdir, skin_dirs=skin_dirs,
+                out_wav=output_path.with_suffix(".hits.wav"),
+                start_ms=start_ms, rate=rate,
+                duration_ms=total_dur_s * 1000.0,
+                synth_style=synth_style_for(has_custom))
+        except Exception as e:  # noqa: BLE001 — hitsounds never break a render
+            print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
+            hits_wav = None
+    proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s,
+                         hitsound_wav=hits_wav)
     # Argon is the DEFAULT skin: skinless renders stay all-Argon (parity with
     # the STD renderer). DanserHud now handles skin_dir=None; plain _Hud only if
     # DanserHud fails to build.
@@ -417,6 +445,13 @@ def render_core(
                 pass
         ret = proc.wait()
         renderer.release()
+        # drop the temp hitsound WAV (R3D_CATCH_KEEP_HITS=1 keeps it for
+        # alignment debugging/verification)
+        if hits_wav is not None and not os.environ.get("R3D_CATCH_KEEP_HITS"):
+            try:
+                Path(hits_wav).unlink(missing_ok=True)
+            except OSError:
+                pass
         import sys as _rsys
         _wall = time.monotonic() - _t_render0
         print(f"done: {n_frames} frames in {_wall:.1f}s "
@@ -465,7 +500,8 @@ def _ffmpeg_has(name: str) -> bool:
 
 
 def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
-                  start_ms: int, rate: float = 1.0, total_dur_s: float | None = None):
+                  start_ms: int, rate: float = 1.0, total_dur_s: float | None = None,
+                  hitsound_wav: Path | None = None):
     w, h = cfg.resolution
     enc, dev = _probe_encoder(cfg)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
@@ -475,6 +511,8 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             "-i", "pipe:0"]
     if audio is not None:
         cmd += ["-i", str(audio)]
+        if hitsound_wav is not None:
+            cmd += ["-i", str(hitsound_wav)]
 
     # video codec + pixel path
     if enc == "h264_vaapi":
@@ -485,12 +523,24 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", "20"]
 
     if audio is not None:
-        af = _audio_filter(start_ms, rate, total_dur_s,
-                           music_volume=cfg.music_volume,
-                           general_volume=cfg.general_volume,
-                           audio_offset_ms=cfg.audio_offset_ms)
-        if af:
-            cmd += ["-af", af]
+        if hitsound_wav is not None:
+            # song + hitsound track: -filter_complex (the -af path can't mix a
+            # second input). The song chain is IDENTICAL to _audio_filter minus
+            # apad; hits amix AFTER the song's loudnorm (mania v2 fix #17).
+            fc = _hitsound_filter_complex(
+                start_ms, rate, total_dur_s,
+                music_volume=cfg.music_volume,
+                general_volume=cfg.general_volume,
+                audio_offset_ms=cfg.audio_offset_ms,
+                hitsound_volume=getattr(cfg, "hitsound_volume", 100))
+            cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+        else:
+            af = _audio_filter(start_ms, rate, total_dur_s,
+                               music_volume=cfg.music_volume,
+                               general_volume=cfg.general_volume,
+                               audio_offset_ms=cfg.audio_offset_ms)
+            if af:
+                cmd += ["-af", af]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
 
     # web-streamable: move the moov atom to the front so browsers/iOS can
@@ -539,6 +589,48 @@ def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = 
     else:
         parts.append("apad")
     return ",".join(parts)
+
+
+def _hitsound_filter_complex(start_ms: int, rate: float,
+                             total_dur_s: float | None,
+                             music_volume: int = 100,
+                             general_volume: int = 100,
+                             audio_offset_ms: int = 0,
+                             hitsound_volume: int = 100) -> str:
+    """The hitsound-enabled audio graph. The SONG chain reproduces
+    _audio_filter exactly (atempo -> align -> loudnorm -> volume) so the
+    music bed is bit-identical to a hitsound-less render; the pre-mixed hits
+    WAV (input 2, already on the video time axis at natural pitch) is amixed
+    ON TOP of the normalised song — never through loudnorm, whose gain would
+    duck the song ~4 dB under every hit (mania v2 LOUDNORM FIX 2026-07-12,
+    #17) — then a clamp-only true-peak limiter catches summed peaks and apad
+    spans the results outro. Hits take general x hitsound volume (stable's
+    master x effect), not music volume."""
+    song = []
+    if abs(rate - 1.0) > 1e-3:
+        song.append(f"atempo={rate:.4f}")
+    real_start = (start_ms - audio_offset_ms) / rate
+    if real_start > 0:
+        song.append(f"atrim=start={real_start / 1000:.3f}")
+        song.append("asetpts=PTS-STARTPTS")
+    elif real_start < 0:
+        song.append(f"adelay={int(-real_start)}:all=1")
+    song.append("loudnorm=I=-10:TP=-1.5:LRA=11")
+    vol = (general_volume / 100.0) * (music_volume / 100.0)
+    if abs(vol - 1.0) > 1e-3:
+        song.append(f"volume={max(0.0, vol):.3f}")
+    hvol = (general_volume / 100.0) * (hitsound_volume / 100.0)
+    hits = ([f"volume={max(0.0, hvol):.3f}"] if abs(hvol - 1.0) > 1e-3
+            else ["anull"])
+    tail = ["amix=inputs=2:duration=longest:normalize=0:weights=1 1",
+            "alimiter=limit=0.95:level=disabled:attack=1:release=20"]
+    if total_dur_s and total_dur_s > 0:
+        tail.append(f"apad=whole_dur={total_dur_s:.3f}")
+    else:
+        tail.append("apad")
+    return (f"[1:a]{','.join(song)}[song];"
+            f"[2:a]{','.join(hits)}[hits];"
+            f"[song][hits]{','.join(tail)}[aout]")
 
 
 def _bg_cover(path: Path, w: int, h: int, blur: int = 0) -> "np.ndarray":

@@ -60,6 +60,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--general-volume", type=int, default=100)
     ap.add_argument("--audio-offset", type=int, default=0, help="ms; -earlier")
+    ap.add_argument("--hitsounds", default="on", metavar="MODE",
+                    help="caught-object hitsounds under the music (stable "
+                         "behaviour). 'off'/'none' disable; any other value "
+                         "(incl. NAS-spec words like perfect/score/acc) = on "
+                         "(default)")
+    ap.add_argument("--hitsound-volume", type=int, default=100,
+                    help="hitsound track volume 0-100 (default 100)")
     ap.add_argument("--bg-dim-intro", type=int, default=0)
     ap.add_argument("--bg-dim-game", type=int, default=70)
     ap.add_argument("--bg-dim-breaks", type=int, default=0)
@@ -130,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         music_volume=args.music_volume,
         general_volume=args.general_volume,
         audio_offset_ms=args.audio_offset,
+        # off/none (any case) disable; unknown values are gracefully ON — the
+        # NAS spec's "hitsounds" field carries mania-flavoured words for some
+        # engines, and only "none" maps to a meaning here.
+        hitsounds=str(args.hitsounds).strip().lower()
+        not in ("off", "none", "0", "false", "no"),
+        hitsound_volume=max(0, min(100, args.hitsound_volume)),
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=args.bg_dim_game,
         bg_dim_breaks=args.bg_dim_breaks,

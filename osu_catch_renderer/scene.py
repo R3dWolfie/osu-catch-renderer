@@ -645,6 +645,12 @@ class CatchSim:
             return _Checkpoint(t_ms, 0, 0, 1.0)
         return self._checkpoints[i]
 
+    def catch_events(self):
+        """(objects, caught) — the simulated objects (death-truncated on a
+        fail) with their aligned caught verdicts, post count-reconcile.
+        The hitsound mixer's input: only CAUGHT objects make a sound."""
+        return self._objs, self._caught
+
     # --- geometry -------------------------------------------------------------
 
     def _sx(self, osu_x: float) -> float:

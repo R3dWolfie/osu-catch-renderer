@@ -15,7 +15,7 @@ import math
 from pathlib import Path
 
 from .legacy_random import RNG_SEED, LegacyRandom
-from .models import CatchBeatmap, CatchObject, ObjType
+from .models import CatchBeatmap, CatchObject, HitSample, ObjType
 from .sliderpath import SliderPath
 
 # HitObject type bitfield
@@ -106,7 +106,14 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False,
         version=meta.get("Version", ""),
         creator=meta.get("Creator", ""),
         combo_colors=_parse_combo_colors(sections.get("Colours", "")),
+        timing=timing,
+        sample_set_default=_SET_IDS.get(
+            str(general.get("SampleSet", "Normal")).strip().lower(), 1),
     )
+
+
+# [General] SampleSet name -> osu set id (1 normal / 2 soft / 3 drum)
+_SET_IDS = {"normal": 1, "soft": 2, "drum": 3, "none": 1}
 
 
 # --- timing -------------------------------------------------------------------
@@ -114,10 +121,28 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False,
 class _Timing:
     """Resolves beat length and SV multiplier at any time."""
 
-    def __init__(self, points: list[tuple[float, float, bool]]):
+    def __init__(self, points: list[tuple[float, float, bool]],
+                 hs_points: list[tuple[float, int, int, int]] | None = None):
         # (time, value, uninherited). value = beatLength for red lines,
         # negative-inverse SV for green lines.
         self.points = points
+        # hitsound state per timing point (red AND green lines both carry it):
+        # (time, sampleSet 0-3, sampleIndex, volume 0-100). Sorted by time.
+        self.hs_points = hs_points or []
+
+    def sample_info(self, t: float) -> tuple[int, int, int]:
+        """(sampleSet, sampleIndex, volume) active at map-time `t` — the last
+        point with time <= t; before the first point, the first point's state
+        (stable/mania convention). No points -> neutral (0, 0, 100)."""
+        pts = self.hs_points
+        if not pts:
+            return 0, 0, 100
+        cur = pts[0]
+        for p in pts:
+            if p[0] > t:
+                break
+            cur = p
+        return cur[1], cur[2], cur[3]
 
     def beat_length(self, t: float) -> float:
         bl = 500.0
@@ -142,6 +167,7 @@ class _Timing:
 
 def _parse_timing(block: str) -> _Timing:
     pts: list[tuple[float, float, bool]] = []
+    hs: list[tuple[float, int, int, int]] = []
     for line in block.splitlines():
         line = line.strip()
         if not line:
@@ -153,11 +179,45 @@ def _parse_timing(block: str) -> _Timing:
         beat = _f(parts[1], 500.0)
         uninherited = True if len(parts) < 7 else parts[6].strip() == "1"
         pts.append((time, beat, uninherited))
+        # hitsound state: time,beatLength,meter,sampleSet,sampleIndex,volume,…
+        if len(parts) >= 6:
+            hs.append((time, _i(parts[3], 0), _i(parts[4], 0),
+                       max(0, min(100, _i(parts[5], 100)))))
     pts.sort(key=lambda p: p[0])
-    return _Timing(pts)
+    hs.sort(key=lambda p: p[0])
+    return _Timing(pts, hs)
+
+
+def _i(s, default: int) -> int:
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return default
 
 
 # --- hit objects --------------------------------------------------------------
+
+def _parse_hit_sample(s: str) -> tuple[int, int, int, int, str]:
+    """The trailing hitSample field `normalSet:additionSet:index:volume:filename`
+    (later fields optional). Returns (normal_set, addition_set, index, volume,
+    filename); zeros mean 'inherit from the timing point'."""
+    parts = (s or "").split(":")
+
+    def _n(i: int) -> int:
+        try:
+            return int(parts[i])
+        except (IndexError, ValueError):
+            return 0
+
+    fname = parts[4].strip() if len(parts) > 4 else ""
+    return _n(0), _n(1), _n(2), _n(3), fname
+
+
+# lazer Banana.default_banana_samples — BananaHitSampleInfo("Gameplay/
+# metronomelow" / "Gameplay/catch-banana", volume 100): every caught banana
+# plays THIS, never the spinner's own hitsounds. One shared instance.
+_BANANA_SAMPLE = HitSample(volume=100, kind="banana")
+
 
 def _parse_hit_objects(block: str, *, timing, slider_mult, tick_rate, hr, lazer=False, rng=None) -> list[CatchObject]:
     out: list[CatchObject] = []
@@ -192,7 +252,11 @@ def _parse_hit_objects(block: str, *, timing, slider_mult, tick_rate, hr, lazer=
                 xe, last_pos, last_t = _hard_rock_offset(x, float(time),
                                                          last_pos, last_t, rng)
                 xe = _clamp(xe, 0.0, 512.0)   # CatchHitObject.EffectiveX clamp
-            out.append(CatchObject(time, xe, ObjType.FRUIT, combo_index, is_new))
+            bits = _i(f[4], 0) if len(f) > 4 else 0
+            ns, ads, idx, vol, fname = _parse_hit_sample(f[5] if len(f) > 5 else "")
+            out.append(CatchObject(time, xe, ObjType.FRUIT, combo_index, is_new,
+                                   sample=HitSample(bits, ns, ads, idx, vol,
+                                                    fname, "hit")))
         elif typ & _TYPE_SLIDER:
             out.extend(_slider_objects(
                 f, x, time, combo_index, is_new,
@@ -278,8 +342,43 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     """Faithful osu!catch juice-stream nesting (lazer JuiceStream):
     Head/Repeat/Tail -> Fruit, Tick -> large Droplet, gaps filled with
     TinyDroplets. This is what makes the accuracy denominator real.
+
+    Hitsounds ride along exactly as lazer's JuiceStream.CreateNestedHitObjects
+    assigns Samples: head/repeat/tail fruits get GetNodeSamples(node) — the
+    per-edge edgeSounds bits + edgeSets banks (falling back to the stream's own
+    hitSound/hitSample) — large droplets get the stream's samples renamed
+    "slidertick" (kind="tick"), and TINY droplets get none (silent).
     """
-    head = [CatchObject(time, x0, ObjType.FRUIT, combo_index, is_new)]
+    # slider line: x,y,time,type,hitSound,curve,slides,length[,edgeSounds]
+    # [,edgeSets][,hitSample]
+    body_bits = _i(f[4], 0) if len(f) > 4 else 0
+    hs_ns, hs_as, hs_idx, hs_vol, _hs_fname = _parse_hit_sample(
+        f[10] if len(f) > 10 else "")
+    edge_bits: list[int] = []
+    if len(f) > 8 and f[8].strip():
+        edge_bits = [_i(tok, body_bits) for tok in f[8].split("|")]
+    edge_sets: list[tuple[int, int]] = []
+    if len(f) > 9 and f[9].strip():
+        for tok in f[9].split("|"):
+            ab = tok.split(":")
+            edge_sets.append((_i(ab[0], 0) if len(ab) > 0 else 0,
+                              _i(ab[1], 0) if len(ab) > 1 else 0))
+
+    def _node_sample(i: int) -> HitSample:
+        """lazer GetNodeSamples(i): NodeSamples[i] when present, else the
+        stream's own Samples; edgeSets banks of 0 fall through to the
+        stream's hitSample banks (readCustomSampleBanks defaults)."""
+        bits = edge_bits[i] if i < len(edge_bits) else body_bits
+        ns, ads = edge_sets[i] if i < len(edge_sets) else (0, 0)
+        return HitSample(bits, ns or hs_ns, ads or hs_as, hs_idx, hs_vol,
+                         "", "hit")
+
+    # large droplet = the stream's samples with the name swapped to
+    # "slidertick" (bank/index/volume kept) — lazer dropletSamples.
+    tick_sample = HitSample(body_bits, hs_ns, hs_as, hs_idx, hs_vol, "", "tick")
+
+    head = [CatchObject(time, x0, ObjType.FRUIT, combo_index, is_new,
+                        sample=_node_sample(0))]
     if len(f) < 8:
         return head
 
@@ -305,23 +404,24 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     min_from_end = velocity * 10.0
 
     # --- slider events in time order: head, ticks/repeats per span, tail ---
-    events: list[tuple[float, float, str]] = [(float(time), 0.0, "head")]
+    # 4th field = hitsound node index (head 0, repeat s+1, tail spans; -1 tick)
+    events: list[tuple[float, float, str, int]] = [(float(time), 0.0, "head", 0)]
     if tick_distance != 0:
         for s in range(spans):
             span_start = time + s * span_dur
             rev = (s % 2) == 1
-            ticks: list[tuple[float, float, str]] = []
+            ticks: list[tuple[float, float, str, int]] = []
             d = tick_distance
             while d <= length - min_from_end:
                 pp = d / length
                 tp = (1.0 - pp) if rev else pp
-                ticks.append((span_start + tp * span_dur, pp, "tick"))
+                ticks.append((span_start + tp * span_dur, pp, "tick", -1))
                 d += tick_distance
             ticks.sort(key=lambda e: e[0])
             events.extend(ticks)
             if s < spans - 1:
                 rep_pp = 1.0 if (s % 2 == 0) else 0.0
-                events.append((span_start + span_dur, rep_pp, "repeat"))
+                events.append((span_start + span_dur, rep_pp, "repeat", s + 1))
     total_dur = spans * span_dur
     tail_pp = 1.0 if (spans % 2 == 1) else 0.0
     # osu! LegacyLastTickOffset: on legacy (.osu) beatmaps the final scoring
@@ -332,7 +432,7 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     last_span_start = time + (spans - 1) * span_dur
     tail_time = max(last_span_start + span_dur / 2.0,
                     time + total_dur - LEGACY_LAST_TICK_OFFSET)
-    events.append((tail_time, tail_pp, "tail"))
+    events.append((tail_time, tail_pp, "tail", spans))
 
     # Emit nested objects in osu's exact order (head, [tinies], event, ...),
     # consuming the RNG per object as CatchBeatmapProcessor does: tiny droplet
@@ -357,13 +457,15 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
         if cur[2] == "tick":
             if rng is not None:
                 rng.next()   # osu!stable retrieved a random droplet rotation
-            out.append(CatchObject(int(cur[0]), path.x_at(cur[1]), ObjType.DROPLET, combo_index, False))
+            out.append(CatchObject(int(cur[0]), path.x_at(cur[1]), ObjType.DROPLET, combo_index, False,
+                                   sample=tick_sample))
         else:  # repeat / tail fruit (no RNG without HardRock)
             # The tail event time is the LegacyLastTick (end-36) so tiny-droplet
             # generation stops there; but the tail FRUIT is caught at the TRUE
             # slider end, so emit it at time+total_dur.
             ft = int(time + total_dur) if cur[2] == "tail" else int(cur[0])
-            out.append(CatchObject(ft, path.x_at(cur[1]), ObjType.FRUIT, combo_index, False))
+            out.append(CatchObject(ft, path.x_at(cur[1]), ObjType.FRUIT, combo_index, False,
+                                   sample=_node_sample(cur[3])))
         prev = cur
     return out
 
@@ -391,7 +493,8 @@ def _banana_shower(time, end, combo_index, is_new, rng=None):
             rng.next()  # banana colour
         else:
             x = (math.sin(idx * 2.399963) * 0.5 + 0.5) * 512.0
-        out.append(CatchObject(int(t), x, ObjType.BANANA, combo_index, is_new and idx == 0))
+        out.append(CatchObject(int(t), x, ObjType.BANANA, combo_index, is_new and idx == 0,
+                               sample=_BANANA_SAMPLE))
         t += spacing
         idx += 1
     return out
