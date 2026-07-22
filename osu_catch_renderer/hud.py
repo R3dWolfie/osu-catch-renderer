@@ -205,9 +205,18 @@ class DanserHud:
             dt = (16.0 if self._hp_last_t is None
                   else max(0.0, min(100.0, t - self._hp_last_t)))
             self._hp_last_t = t
-            arr = np.asarray(img).copy()
-            self.argon_hp.update_draw(arr, scene.hp, dt)
-            img = Image.fromarray(arr)
+            # PERF: the bar only ever touches its own clip box — round-trip
+            # just that crop through numpy instead of the whole frame (the
+            # composites clip identically inside it; pixels are unchanged).
+            xa, ya, xb, yb = self.argon_hp.clip_box(self.w, self.h)
+            if xb > xa and yb > ya:
+                sub = np.array(img.crop((xa, ya, xb, yb)))
+                self.argon_hp.update_draw(sub, scene.hp, dt, origin=(xa, ya))
+                img.paste(Image.fromarray(sub, "RGB"), (xa, ya))
+            else:                       # fully off-screen: advance state only
+                self.argon_hp.update_draw(
+                    np.zeros((1, 1, 3), np.uint8), scene.hp, dt,
+                    origin=(-10**9, -10**9))
             ah.draw_health_line(img)
 
         if _on("show_score"):

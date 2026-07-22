@@ -8,7 +8,7 @@ replay's authoritative counts; the live values are our running simulation.
 """
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
 from .assets import ARGON_CANVAS, ARGON_VARIANTS
@@ -152,6 +152,16 @@ class CatchSim:
         self._hyper_windows: list[tuple[int, int]] = []    # catcher glows red in these
         self._calibrate_offset()
         self._simulate()
+        # PERF: state_at bisects this precomputed list instead of rebuilding
+        # it every call (it is immutable after _simulate).
+        self._cp_times = [c.time for c in self._checkpoints]
+        # PERF: build_scene narrows the falling-object scan to the visible
+        # time window by bisecting these start times. Only valid when the
+        # object list is time-sorted (it is, in beatmap order — but verify;
+        # an unsorted list falls back to the full scan, output-identical).
+        self._obj_times = [o.time_ms for o in self._objs]
+        self._objs_sorted = all(a <= b for a, b in
+                                zip(self._obj_times, self._obj_times[1:]))
 
     # --- simulation -----------------------------------------------------------
 
@@ -411,8 +421,7 @@ class CatchSim:
     def state_at(self, t_ms: int) -> _Checkpoint:
         if not self._checkpoints:
             return _Checkpoint(t_ms, 0, 0, 1.0)
-        times = [c.time for c in self._checkpoints]
-        i = bisect_right(times, t_ms) - 1
+        i = bisect_right(self._cp_times, t_ms) - 1
         if i < 0:
             return _Checkpoint(t_ms, 0, 0, 1.0)
         return self._checkpoints[i]
@@ -447,10 +456,12 @@ class CatchSim:
 
     def build_scene(self, t_ms: int) -> SceneState:
         s = SceneState(time_ms=t_ms)
+        # break check, shared by the bg dim + the letterbox below (PERF hoist)
+        in_break = (any(a <= t_ms <= b for a, b in self.bm.breaks)
+                    if self.bm.breaks else False)
         # dimmed beatmap background (drawn first, behind everything)
         if self.has_bg:
             # preset bg dim per phase: % dim (higher=darker) -> brightness mult
-            in_break = any(a <= t_ms <= b for a, b in self.bm.breaks)
             first_t = self.bm.objects[0].time_ms if self.bm.objects else 0
             dim_pct = (self.cfg.bg_dim_breaks if in_break
                        else self.cfg.bg_dim_intro if t_ms < first_t
@@ -465,7 +476,16 @@ class CatchSim:
         # rotating to 2× their tilt — lazer's DrawableCatchHitObject miss
         # (FadeOut(250).RotateTo(Rotation*2, 250, Easing.Out)). Blinking out at
         # the plate was the single biggest "not osu" tell on drops.
-        for obj, caught in zip(self._objs, self._caught):
+        # PERF: only objects with time_ms in [t-250, t+preempt] can pass the
+        # visibility test below — bisect that window out of the (sorted)
+        # object list instead of scanning the whole map every frame. The
+        # per-object test is kept verbatim as the authoritative filter.
+        if self._objs_sorted:
+            _lo = bisect_left(self._obj_times, t_ms - 250)
+            _hi = bisect_right(self._obj_times, t_ms + self.preempt)
+        else:
+            _lo, _hi = 0, len(self._objs)
+        for obj, caught in zip(self._objs[_lo:_hi], self._caught[_lo:_hi]):
             end = obj.time_ms if caught else obj.time_ms + 250
             if not (obj.time_ms - self.preempt <= t_ms <= end):
                 continue
@@ -505,7 +525,7 @@ class CatchSim:
         s.sprites.extend(self._catch_explosions(t_ms))
 
         # letterbox + dim during breaks (drawn last so bars sit on top)
-        if self.cfg.letterbox_breaks and any(a <= t_ms <= b for a, b in self.bm.breaks):
+        if self.cfg.letterbox_breaks and in_break:
             bar = self.screen_h * 0.11
             s.sprites.append(Sprite(self.screen_w / 2, bar / 2, self.screen_w, bar,
                                     texture_key=None, color=(0, 0, 0, 0.92)))

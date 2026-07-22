@@ -84,6 +84,14 @@ class SpriteRenderer:
             self.prog, [(self.vbo, "2f 2f", "in_pos", "in_uv")],
         )
         self.prog["u_screen"].value = (float(width), float(height))
+        # PERF: resolve uniform handles once (prog[...] is a dict lookup +
+        # wrapper build per call) and set the sampler unit a single time —
+        # it is always texture unit 0. GL state/output is unchanged.
+        self.prog["u_tex"].value = 0
+        self._u_color = self.prog["u_color"]
+        self._u_center = self.prog["u_center"]
+        self._u_size = self.prog["u_size"]
+        self._u_rot = self.prog["u_rot"]
 
         rb = self.ctx.renderbuffer((width, height))
         self.fbo = self.ctx.framebuffer(color_attachments=[rb])
@@ -144,11 +152,10 @@ class SpriteRenderer:
         if tex is None:
             tex = self._white
         tex.use(location=0)
-        self.prog["u_tex"].value = 0
-        self.prog["u_color"].value = sp.color
-        self.prog["u_center"].value = (sp.x, sp.y)
-        self.prog["u_size"].value = (sp.w, sp.h)
-        self.prog["u_rot"].value = sp.rotation
+        self._u_color.value = sp.color
+        self._u_center.value = (sp.x, sp.y)
+        self._u_size.value = (sp.w, sp.h)
+        self._u_rot.value = sp.rotation
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
     _PBO_RING = 3

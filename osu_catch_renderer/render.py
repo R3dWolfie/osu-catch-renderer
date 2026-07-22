@@ -356,8 +356,11 @@ def render_core(
                         _emit_gameplay(raw)
                     # outro: frozen final gameplay frame, then the results card
                     # fades in (consistent with the mania renderer). Real-time.
+                    # (No .copy(): draw_results/render_frame never mutate their
+                    # input — they fromarray-copy — and the writer only reads,
+                    # so the frozen frame can be pushed by reference. PERF.)
                     t = int(gameplay_end_ms + (i - gameplay_frames) * frame_ms)
-                    rgb = last_gameplay.copy() if last_gameplay is not None else \
+                    rgb = last_gameplay if last_gameplay is not None else \
                         renderer.read_rgb()
                     if cfg.show_results and t >= results_start_ms:
                         op = min(1.0, (t - results_start_ms) / FADE_MS)

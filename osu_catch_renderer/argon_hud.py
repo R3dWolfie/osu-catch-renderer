@@ -447,8 +447,14 @@ class ArgonHud:
         if a8 == 0:
             return None
         key = (name, w, h, r, g, b, a8)
-        hit = self._cache.get(key)
+        cache = self._cache
+        hit = cache.get(key)
         if hit is not None:
+            # LRU refresh (dicts iterate in insertion order): re-inserting on
+            # hit keeps hot glyphs alive, so the eviction below can't dump the
+            # per-frame digit cells the way the old wholesale clear() did.
+            del cache[key]
+            cache[key] = hit
             return hit
         base = self._alpha.get(name)
         if base is None:
@@ -460,9 +466,9 @@ class ArgonHud:
         out[..., 2] = b
         out[..., 3] = (am * a8 // 255).astype(np.uint8)
         im = Image.fromarray(out, "RGBA")
-        if len(self._cache) > 4096:      # combo pops make continuous sizes
-            self._cache.clear()
-        self._cache[key] = im
+        if len(cache) >= 4096:           # combo pops make continuous sizes
+            cache.pop(next(iter(cache)))     # evict least-recently-used
+        cache[key] = im
         return im
 
     def _paste_center(self, img, cell, cx_px: float, cy_px: float) -> None:
@@ -694,12 +700,15 @@ class ArgonHud:
         """The BoxElement healthLine (CornerRadius .5): (0, 30), 45×3."""
         es, lk = self.es, self.lk
         lw, lh = HP_LINE_SIZE
-        w_px = max(1, int(round(lw * es * lk)))
-        h_px = max(1, int(round(lh * es * lk)))
-        a = bake_pill_alpha(w_px, h_px) * self.op
-        rgba = np.full((h_px, w_px, 4), 255, np.uint8)
-        rgba[..., 3] = np.round(a * 255.0).astype(np.uint8)
-        pill = Image.fromarray(rgba, "RGBA")
+        # PERF: the pill is size/opacity-constant per render — bake it once.
+        pill = getattr(self, "_health_line_pill", None)
+        if pill is None:
+            w_px = max(1, int(round(lw * es * lk)))
+            h_px = max(1, int(round(lh * es * lk)))
+            a = bake_pill_alpha(w_px, h_px) * self.op
+            rgba = np.full((h_px, w_px, 4), 255, np.uint8)
+            rgba[..., 3] = np.round(a * 255.0).astype(np.uint8)
+            pill = self._health_line_pill = Image.fromarray(rgba, "RGBA")
         self._paste_center(img, pill, (lw / 2.0) * es * lk,
                            HP_LINE_Y * es * lk)
 
@@ -737,6 +746,11 @@ class ArgonHud:
                     add[sh - gh:, xa:xb] = 0.45
         self._graph_add = (add * 0.2 * 255.0 * self.op)[..., None]
         self._pill_bg = bake_pill_alpha(sw, sh) * (0.3 * self.op)
+        # PERF hoists for draw_progress: the broadcast view of the bg pill is
+        # constant; the fill pill is cached per width (frac moves ~1px/frame,
+        # so consecutive frames usually reuse the previous bake).
+        self._pill_bg_b = self._pill_bg[..., None]
+        self._fill_pill: tuple | None = None       # (fw, alpha-with-axis)
 
     def draw_progress(self, img, t: float) -> None:
         """The Argon progress strip: faint density graph (additive), the
@@ -749,16 +763,20 @@ class ArgonHud:
         # density graph — additive
         region += self._graph_add
         # bar background pill — over
-        a = self._pill_bg[..., None]
+        a = self._pill_bg_b
         region = region * (1.0 - a) + (0.2 * 255.0) * a
         # fill pill — over
         frac = (t - self.first_t) / max(self.last_t - self.first_t, 1.0)
         frac = _clamp01(frac) if t >= self.first_t else 0.0
         if frac > 0.003:
             fw = max(1, int(round((sx1 - sx0) * frac)))
-            fa = bake_pill_alpha(fw, sy1 - sy0) * (0.95 * self.op)
-            region[:, :fw] = (region[:, :fw] * (1.0 - fa[..., None])
-                              + (0.9 * 255.0) * fa[..., None])
+            if self._fill_pill is None or self._fill_pill[0] != fw:
+                fa = (bake_pill_alpha(fw, sy1 - sy0)
+                      * (0.95 * self.op))[..., None]
+                self._fill_pill = (fw, fa)
+            fa = self._fill_pill[1]
+            region[:, :fw] = (region[:, :fw] * (1.0 - fa)
+                              + (0.9 * 255.0) * fa)
         img.paste(Image.fromarray(
             np.clip(region, 0.0, 255.0).astype(np.uint8), "RGB"),
             (sx0, sy0))

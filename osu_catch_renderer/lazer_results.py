@@ -1205,11 +1205,19 @@ class CatchLazerResults:
         if settled and self._settled is not None:
             return self._settled
 
-        base = Image.fromarray(rgb, "RGB").convert("RGBA")
         # BLACK background: std's scene has faded to black by results_start
         # and the screen dims what's left — the results sit on clean black.
-        base = Image.alpha_composite(
-            base, Image.new("RGBA", base.size, (0, 0, 0, int(op * 255))))
+        # PERF: once the wash is fully opaque (op == 1.0 after the 400 ms
+        # fade — most outro frames) compositing (0,0,0,255) over ANY frame
+        # is exactly opaque black, so skip the two full-frame ops and start
+        # from black directly (bit-identical: src a=255 ⇒ out = src).
+        if op >= 1.0:
+            base = Image.new("RGBA", (rgb.shape[1], rgb.shape[0]),
+                             (0, 0, 0, 255))
+        else:
+            base = Image.fromarray(rgb, "RGB").convert("RGBA")
+            base = Image.alpha_composite(
+                base, Image.new("RGBA", base.size, (0, 0, 0, int(op * 255))))
 
         fade = _clamp01(age_ms / FADE_MS) * op
         if fade > 0.003:

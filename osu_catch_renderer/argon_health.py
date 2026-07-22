@@ -214,6 +214,15 @@ class ArgonHealth:
         self._miss_t = None          # ms since miss started, or None
         self._flash_t = 1e9          # ms since last heal flash
         self._prev_hp = None
+        # per-frame layer caches (PERF, output-identical): each cache stores
+        # the exact (rgb, a) arrays produced for the exact float inputs of the
+        # previous frame and is reused only when EVERY input is unchanged —
+        # bit-identical by construction. The background track is a pure
+        # function of the (fixed) geometry, so it is computed once.
+        self._bg_cache = None                      # (rgb, a) — frame-invariant
+        self._glow_key = self._glow_cache = None   # keyed (lo, hi, colours, a)
+        self._main_key = self._main_cache = None   # keyed hv
+        self._orig = (0, 0)                        # crop origin (see clip_box)
 
     # -- value animation (mirrors ArgonHealthDisplay.Update / miss display) ----
     def _advance(self, target_hp: float, dt_ms: float):
@@ -241,8 +250,20 @@ class ArgonHealth:
             # else: glow frozen (the stretched trail)
         self._flash_t += dt_ms
 
+    def clip_box(self, W: int, H: int):
+        """Union of the three layers' pixel rects, clipped to WxH — every
+        pixel update_draw can touch. Lets the caller hand update_draw a small
+        crop of the frame instead of the whole frame (PERF; the composites
+        clip identically inside the crop, so output is unchanged)."""
+        layers = (self.bg, self.main, self.glow)
+        xa = max(0, min(l.ox for l in layers))
+        ya = max(0, min(l.oy for l in layers))
+        xb = min(W, max(l.ox + l.w_px for l in layers))
+        yb = min(H, max(l.oy + l.h_px for l in layers))
+        return xa, ya, xb, yb
+
     def _composite_additive(self, img, layer, rgb, a):
-        x0, y0 = layer.ox, layer.oy
+        x0, y0 = layer.ox - self._orig[0], layer.oy - self._orig[1]
         H, W = img.shape[:2]
         xa, ya = max(0, x0), max(0, y0)
         xb, yb = min(W, x0 + layer.w_px), min(H, y0 + layer.h_px)
@@ -255,7 +276,7 @@ class ArgonHealth:
         img[ya:yb, xa:xb] = np.clip(sub + cr * ar, 0, 255).astype(np.uint8)
 
     def _composite_over(self, img, layer, rgb, a):
-        x0, y0 = layer.ox, layer.oy
+        x0, y0 = layer.ox - self._orig[0], layer.oy - self._orig[1]
         H, W = img.shape[:2]
         xa, ya = max(0, x0), max(0, y0)
         xb, yb = min(W, x0 + layer.w_px), min(H, y0 + layer.h_px)
@@ -267,17 +288,24 @@ class ArgonHealth:
         cr = rgb[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)] * 255.0
         img[ya:yb, xa:xb] = np.clip(sub * (1.0 - ar) + cr * ar, 0, 255).astype(np.uint8)
 
-    def update_draw(self, rgb_arr: np.ndarray, hp: float, dt_ms: float):
+    def update_draw(self, rgb_arr: np.ndarray, hp: float, dt_ms: float,
+                    origin=(0, 0)):
         """Advance the animation by dt_ms and composite the bar onto rgb_arr
-        (HxWx3 uint8, modified in place)."""
+        (HxWx3 uint8, modified in place). `origin` = rgb_arr's top-left in
+        screen px when the caller passes a clip_box() crop instead of the
+        whole frame (default (0,0) keeps the old full-frame contract)."""
+        self._orig = origin
         hp = float(max(0.0, min(1.0, hp)))
         self._advance(hp, dt_ms)
         hv = float(max(0.0, min(1.0, self._hp)))
         gv = float(max(0.0, min(1.0, self._glow)))
 
-        # 1) background track (full length, normal blend)
-        bd = self.bg.distance(0.0, 1.0)
-        brgb, ba = _colour_bg(bd, self.bg.R)
+        # 1) background track (full length, normal blend) — geometry-only,
+        # identical every frame: compute once, composite the cached layer.
+        if self._bg_cache is None:
+            bd = self.bg.distance(0.0, 1.0)
+            self._bg_cache = _colour_bg(bd, self.bg.R)
+        brgb, ba = self._bg_cache
         self._composite_over(rgb_arr, self.bg, brgb, ba)
 
         # 2) glow bar over [hv, max(gv,hv)] (additive)
@@ -299,16 +327,25 @@ class ArgonHealth:
         if hv > 1e-4:
             # always draw the glow (zero-length -> a bright tip cap at the
             # leading health edge, as in lazer); a miss stretches it into the
-            # red drain trail.
-            gd = self.glow.distance(lo, hi)
-            grgb, ga = _colour_bar(gd, self.glow.R, GLOW_GLOW_PORTION,
-                                   bar_rgb, 1.0, glow_rgb, glow_a)
-            ga = ga * (0.8 + 0.2 * self.glow.xfrac)        # horizontal gradient
+            # red drain trail. The layer is a pure function of the key below
+            # (the damped values converge, so stable stretches reuse it).
+            gkey = (lo, hi, bar_rgb, glow_rgb, glow_a)
+            if gkey != self._glow_key:
+                gd = self.glow.distance(lo, hi)
+                grgb, ga = _colour_bar(gd, self.glow.R, GLOW_GLOW_PORTION,
+                                       bar_rgb, 1.0, glow_rgb, glow_a)
+                ga = ga * (0.8 + 0.2 * self.glow.xfrac)    # horizontal gradient
+                self._glow_key, self._glow_cache = gkey, (grgb, ga)
+            grgb, ga = self._glow_cache
             self._composite_additive(rgb_arr, self.glow, grgb, ga)
 
-        # 3) main bar over [0, hv] (additive, white core + blue edge)
+        # 3) main bar over [0, hv] (additive, white core + blue edge) — pure
+        # function of hv; reuse while hv is unchanged.
         if hv > 1e-4:
-            md = self.main.distance(0.0, hv)
-            mrgb, ma = _colour_bar(md, self.main.R, MAIN_GLOW_PORTION,
-                                   (1.0, 1.0, 1.0), 1.0, GLOW_RGB, GLOW_A)
+            if hv != self._main_key or self._main_cache is None:
+                md = self.main.distance(0.0, hv)
+                mrgb, ma = _colour_bar(md, self.main.R, MAIN_GLOW_PORTION,
+                                       (1.0, 1.0, 1.0), 1.0, GLOW_RGB, GLOW_A)
+                self._main_key, self._main_cache = hv, (mrgb, ma)
+            mrgb, ma = self._main_cache
             self._composite_additive(rgb_arr, self.main, mrgb, ma)
