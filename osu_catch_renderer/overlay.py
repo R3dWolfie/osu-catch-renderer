@@ -14,6 +14,7 @@ The catcher texture is grayscaled once at upload (render_core, key
 from __future__ import annotations
 
 import colorsys
+from bisect import bisect_left, bisect_right
 
 from .models import SceneState, Sprite
 from .replay import catcher_x_at
@@ -109,7 +110,17 @@ class CatchOverlaySim:
                                     texture_key="bg", color=(d, d, d, 1.0)))
 
         # SHARED falling fruits — FULL SKIN
-        for obj, caught in zip(base._objs, self._merged):
+        # PERF: only objects with time_ms in [t-250, t+preempt] can pass the
+        # visibility test below — bisect that window out of the (sorted)
+        # object list instead of scanning the whole map every frame (same
+        # windowing CatchSim.build_scene already does; the per-object test
+        # stays the authoritative filter, and iteration order is unchanged).
+        if base._objs_sorted:
+            _lo = bisect_left(base._obj_times, t_ms - 250)
+            _hi = bisect_right(base._obj_times, t_ms + base.preempt)
+        else:
+            _lo, _hi = 0, len(base._objs)
+        for obj, caught in zip(base._objs[_lo:_hi], self._merged[_lo:_hi]):
             end = obj.time_ms if caught else obj.time_ms + 250
             if not (obj.time_ms - base.preempt <= t_ms <= end):
                 continue

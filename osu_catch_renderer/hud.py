@@ -355,14 +355,24 @@ class DanserHud:
             # LegacyScoreCounter: TopRight, Scale .96, Margin horizontal 10.
             disp = int(round(self._rolled("score", float(max(int(scene.score), 0)),
                                           t, 1000.0)))
-            num = self._number(f"{disp:06d}",
-                               self.score_glyphs, self._score_overlap())
             k = self.h / 768.0
             sc_c = self._comp("LegacyScoreCounter")
             s_scale = (sc_c.scale[1] if sc_c else 0.96)
             sh = max(1, int(self.h * 0.052 * (s_scale / 0.96)))
-            num = num.resize((max(1, int(num.width * sh / num.height)), sh),
-                             Image.LANCZOS)
+            # PERF: single-slot memo — whenever the rolled score is unchanged
+            # from the previous frame (settled counter: any pause > the 1s
+            # roll), reuse the assembled+resized digits. Same inputs -> same
+            # bytes; a changed value rebuilds exactly as before.
+            _sk = (disp, sh)
+            _sm = getattr(self, "_score_num_memo", None)
+            if _sm is not None and _sm[0] == _sk:
+                num = _sm[1]
+            else:
+                num = self._number(f"{disp:06d}",
+                                   self.score_glyphs, self._score_overlap())
+                num = num.resize((max(1, int(num.width * sh / num.height)), sh),
+                                 Image.LANCZOS)
+                self._score_num_memo = (_sk, num)
             sx, sy = self._place("LegacyScoreCounter", num.width, num.height,
                                  (W - int(10 * k) - num.width, int(10 * k)))
             self._paste(img, num, sx, sy)
@@ -372,13 +382,22 @@ class DanserHud:
                                     t, 375.0)
             acc_txt = self._acc_text(disp_acc)
             accg = self.acc_glyphs or self.score_glyphs
-            accimg = self._number(acc_txt, accg, self._score_overlap())
             ac_c = self._comp("LegacyAccuracyCounter")
             a_scale = (ac_c.scale[1] if ac_c else 0.576)
             ah_px = max(1, int(self.h * 0.052 * (a_scale / 0.96)))
-            accimg = accimg.resize(
-                (max(1, int(accimg.width * ah_px / accimg.height)), ah_px),
-                Image.LANCZOS)
+            # PERF: single-slot memo, same pattern as the score digits — the
+            # accuracy text settles 375ms after every change, so most frames
+            # redraw an identical string. Same inputs -> same bytes.
+            _ak = (acc_txt, ah_px)
+            _am = getattr(self, "_acc_num_memo", None)
+            if _am is not None and _am[0] == _ak:
+                accimg = _am[1]
+            else:
+                accimg = self._number(acc_txt, accg, self._score_overlap())
+                accimg = accimg.resize(
+                    (max(1, int(accimg.width * ah_px / accimg.height)), ah_px),
+                    Image.LANCZOS)
+                self._acc_num_memo = (_ak, accimg)
             axd = W - int(17 * k) - accimg.width
             ayd = sy + num.height
             ax, ay = self._place("LegacyAccuracyCounter", accimg.width,
@@ -750,21 +769,49 @@ class DanserHud:
                 # the skin's own marker art (possibly a deliberate 1x1 blank)
                 mw = max(1, int(round(marker_sprite.width * k * mscale)))
                 mh = max(1, int(round(marker_sprite.height * k * mscale)))
-                m = (marker_sprite if (mw, mh) == marker_sprite.size
-                     else marker_sprite.resize((mw, mh), Image.LANCZOS))
+                if (mw, mh) == marker_sprite.size:
+                    m = marker_sprite
+                else:
+                    # PERF: mscale RESTS at 0.8 after the first HP gain, so
+                    # this resize ran every frame forever. Cache per target
+                    # size (the bulge sweeps only a handful of sizes; art
+                    # images live for the whole render, so id() keys are
+                    # stable). Same resize inputs -> same bytes.
+                    mcache = getattr(self, "_hp_marker_cache", None)
+                    if mcache is None:
+                        mcache = self._hp_marker_cache = {}
+                    mkey = (id(marker_sprite), mw, mh)
+                    m = mcache.get(mkey)
+                    if m is None:
+                        m = marker_sprite.resize((mw, mh), Image.LANCZOS)
+                        mcache[mkey] = m
                 self._paste(img, m, int(mx - mw / 2.0), int(my - mh / 2.0))
                 return
             # skin scorebar without any marker art -> the drawn ball below
-        # marker: glowing ball centred on the fill's right edge
+        # marker: glowing ball centred on the fill's right edge.
+        # PERF: the ball only ever touches its own ~(2*1.9*mr)px box —
+        # round-trip just that crop through RGBA instead of the whole frame
+        # (a full-frame convert+composite+convert EVERY frame was the single
+        # biggest per-frame HUD cost on skinned renders). alpha_composite is
+        # per-pixel, and every pixel outside the box was untouched by the old
+        # full-frame composite, so the output bytes are identical.
         mr = 12.0 * k * mscale
-        layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ext = mr * 1.9 + 2.0
+        bx0, by0 = max(0, int(mx - ext)), max(0, int(my - ext))
+        bx1 = min(img.width, int(mx + ext) + 2)
+        by1 = min(img.height, int(my + ext) + 2)
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        sub = img.crop((bx0, by0, bx1, by1)).convert("RGBA")
+        layer = Image.new("RGBA", sub.size, (0, 0, 0, 0))
         ld = ImageDraw.Draw(layer)
         for rr, a in ((mr * 1.9, 45), (mr * 1.35, 90)):
-            ld.ellipse([mx - rr, my - rr, mx + rr, my + rr], fill=(*col, a))
-        ld.ellipse([mx - mr * 0.62, my - mr * 0.62, mx + mr * 0.62, my + mr * 0.62],
+            ld.ellipse([mx - rr - bx0, my - rr - by0,
+                        mx + rr - bx0, my + rr - by0], fill=(*col, a))
+        ld.ellipse([mx - mr * 0.62 - bx0, my - mr * 0.62 - by0,
+                    mx + mr * 0.62 - bx0, my + mr * 0.62 - by0],
                    fill=(*col, 255))
-        img.paste(Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB"),
-                  (0, 0))
+        img.paste(Image.alpha_composite(sub, layer).convert("RGB"), (bx0, by0))
 
     def _draw_song_progress_pie(self, img, t_ms: int, acc_box) -> None:
         """LegacySongProgress — a 33x33 CIRCULAR PIE (not a bar, and with NO time
@@ -792,11 +839,22 @@ class DanserHud:
         pb = [x + pad, y + pad, x + box - pad, y + box - pad]
         if prog > 0.001:
             end = -90.0 + 360.0 * max(0.0, min(1.0, prog))
-            # ~60% alpha over the frame
-            layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            ImageDraw.Draw(layer).pieslice(pb, -90.0, end, fill=(*col, 153))
-            img.paste(Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB"),
-                      (0, 0))
+            # ~60% alpha over the frame. PERF: the pie only touches its own
+            # box — round-trip just that crop through RGBA instead of the
+            # whole 1080p frame (two full-frame converts + a full-frame
+            # alpha_composite, every frame). Per-pixel identical: pixels
+            # outside the box were untouched by the full-frame composite.
+            bx0, by0 = max(0, int(x) - 2), max(0, int(y) - 2)
+            bx1 = min(img.width, int(x) + box + 3)
+            by1 = min(img.height, int(y) + box + 3)
+            if bx1 > bx0 and by1 > by0:
+                sub = img.crop((bx0, by0, bx1, by1)).convert("RGBA")
+                layer = Image.new("RGBA", sub.size, (0, 0, 0, 0))
+                ImageDraw.Draw(layer).pieslice(
+                    [pb[0] - bx0, pb[1] - by0, pb[2] - bx0, pb[3] - by0],
+                    -90.0, end, fill=(*col, 153))
+                img.paste(Image.alpha_composite(sub, layer).convert("RGB"),
+                          (bx0, by0))
             d = ImageDraw.Draw(img)
         # 2px white ring + 4px centre dot
         d.ellipse([x, y, x + box, y + box], outline=(255, 255, 255),
@@ -886,14 +944,30 @@ class DanserHud:
         cg = self.combo_glyphs or self.score_glyphs
         if not cg:
             return
-        txt = self._number(str(combo), cg, self._combo_overlap())
-        if txt.width < 1 or txt.height < 1:
-            return
         base_h = self.h * 0.075 * 0.8      # LegacyCatchComboCounter Scale = 0.8
         th = max(1, int(base_h * scale))
-        tw = max(1, int(txt.width * th / txt.height))
-        txt = txt.resize((tw, th), Image.LANCZOS)
+        # PERF: single-slot memo of the assembled+resized digits. After the
+        # 340ms pop settles, scale (and so th) is constant until the combo
+        # changes — the same image was rebuilt every frame. The fade below
+        # works on a copy so the cached image stays pristine. Same inputs ->
+        # same bytes as the per-frame rebuild.
+        _ck = (combo, th)
+        _cm = getattr(self, "_combo_num_memo", None)
+        if _cm is not None and _cm[0] == _ck:
+            txt = _cm[1]
+            if txt is None:
+                return
+            tw = txt.width
+        else:
+            txt = self._number(str(combo), cg, self._combo_overlap())
+            if txt.width < 1 or txt.height < 1:
+                self._combo_num_memo = (_ck, None)
+                return
+            tw = max(1, int(txt.width * th / txt.height))
+            txt = txt.resize((tw, th), Image.LANCZOS)
+            self._combo_num_memo = (_ck, txt)
         if alpha < 1.0:
+            txt = txt.copy()
             txt.putalpha(txt.getchannel("A").point(lambda v: int(v * alpha)))
         # catcher position -> screen: track the catcher like stable/lazer's
         # LegacyCatchComboCounter. SceneState carries the geometry
