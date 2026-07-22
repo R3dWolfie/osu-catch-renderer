@@ -310,34 +310,50 @@ def _banana_shower(time, end, combo_index, is_new, rng=None):
 
 
 def _mark_hyperdash(objects: list[CatchObject], cs: float) -> list[CatchObject]:
-    """Flag fruits that require a hyperdash to reach the next catchable object.
+    """Flag palpable objects that require a hyperdash to reach the next one.
 
-    Mirrors osu!catch's reachability test (catcher can/can't cover the gap in
-    time at dash speed) using the lastExcess/lastDirection carry. DASH_SPEED is
-    in osu px/ms; it's an approximation but flags the genuine hyper jumps.
+    Exact port of osu!lazer's CatchBeatmapProcessor.initialiseHyperDash:
+    palpable objects = Fruits + large Droplets (NO tiny droplets, NO bananas),
+    ordered by start time. Walk consecutive pairs carrying lastDirection /
+    lastExcess; flag `current` as a hyperdash to next.x when the catcher
+    cannot cover the gap in time at base walk speed (distanceToHyper < 0).
     """
     from dataclasses import replace
 
-    from .models import cs_to_catcher_half_width
-    DASH_SPEED = 1.35   # osu px/ms, calibrated so only genuine big jumps flag
-    half = cs_to_catcher_half_width(cs) / 0.8   # full catcher, not just catch range
-    catchable = [o for o in objects if o.kind in (ObjType.FRUIT, ObjType.DROPLET)]
+    # Catcher constants (osu!lazer Catcher.cs). BASE_SPEED is osu px per ms;
+    # hyperdash generation uses base speed, NOT dash speed.
+    BASE_SIZE = 106.75
+    BASE_SPEED = 1.0
+    # CalculateCatchWidth = BASE_SIZE * |scale| * ALLOWED_CATCH_RANGE (0.8);
+    # halfCatcherWidth = width / 2 / ALLOWED_CATCH_RANGE — the 0.8 cancels.
+    scale = 1.0 - 0.7 * (cs - 5.0) / 5.0
+    half_catcher_width = BASE_SIZE * abs(scale) / 2.0
+
+    # GetPalpableObjects orders by StartTime (slider tails can be emitted
+    # out of file order here, so the sort matters).
+    palpable = sorted(
+        (o for o in objects if o.kind in (ObjType.FRUIT, ObjType.DROPLET)),
+        key=lambda o: o.time_ms,
+    )
+
     hyper_ids: dict[int, float] = {}
-    last_dir = 0
-    last_excess = half
-    for a, b in zip(catchable, catchable[1:]):
-        dt = b.time_ms - a.time_ms
-        if dt <= 0:
-            continue
-        this_dir = 1 if b.x > a.x else -1
-        dist = abs(b.x - a.x) - (last_excess if last_dir == this_dir else half)
-        reach = dt * DASH_SPEED - dist
-        if reach < 0:
-            hyper_ids[id(a)] = b.x
-            last_excess = half
+    last_direction = 0
+    last_excess = half_catcher_width
+    for cur, nxt in zip(palpable, palpable[1:]):
+        this_direction = 1 if nxt.x > cur.x else -1
+        # The -1000/60/4 term is 1/4 of a 60fps frame of slack, per lazer.
+        time_to_next = nxt.time_ms - cur.time_ms - 1000.0 / 60.0 / 4.0
+        distance_to_next = abs(nxt.x - cur.x) - (
+            last_excess if last_direction == this_direction else half_catcher_width
+        )
+        distance_to_hyper = time_to_next * BASE_SPEED - distance_to_next
+        if distance_to_hyper < 0:
+            hyper_ids[id(cur)] = nxt.x
+            last_excess = half_catcher_width
         else:
-            last_excess = max(0.0, min(reach, half))
-        last_dir = this_dir
+            last_excess = max(0.0, min(distance_to_hyper, half_catcher_width))
+        last_direction = this_direction
+
     return [replace(o, hyperdash=True, hyper_target_x=hyper_ids[id(o)])
             if id(o) in hyper_ids else o for o in objects]
 
