@@ -96,6 +96,10 @@ class CatchSim:
                  end_ms: int | None = None):
         self.bm = beatmap
         self.frames = frames
+        # catcher facing timeline (lazer VisualDirection) — built lazily from
+        # self.frames on first _facing_at call (frames can still be shifted by
+        # _calibrate_offset during setup, which invalidates this).
+        self._facing_changes: list[tuple[int, float]] | None = None
         self.cfg = cfg
         self.skin = skin
         self.meta = meta
@@ -244,6 +248,7 @@ class CatchSim:
             shift = -best_off
             self.frames = [CatchFrame(time_ms=f.time_ms + shift, x=f.x,
                                       dashing=f.dashing) for f in frames]
+            self._facing_changes = None   # facing timeline shifts with frames
             print(f"[catch] replay timeline shift {shift:+d}ms applied "
                   f"(catcher alignment {base * 100:.0f}% -> {best * 100:.0f}%)",
                   file=sys.stderr, flush=True)
@@ -893,27 +898,66 @@ class CatchSim:
             out.append(Sprite(x, y, size, size, texture_key=ov, color=(1, 1, 1, 1), rotation=rot))
         return out
 
-    def _catcher_ghost(self, scx, rgb, alpha, scale=1.0, dy=0.0) -> list[Sprite]:
+    def _facing_at(self, t_ms) -> float:
+        """Catcher facing at t_ms: +1.0 = right, -1.0 = left — osu!lazer
+        CatcherArea.SetCatcherPosition: `if (lastPosition < newPosition)
+        VisualDirection = Direction.Right; else if (lastPosition > newPosition)
+        VisualDirection = Direction.Left;` — the facing flips ONLY while x
+        strictly changes; a stationary catcher KEEPS its last direction, and
+        the initial facing is Right (Catcher.VisualDirection's default).
+        Catcher.Update turns it into `body.Scale = new Vector2((int)
+        VisualDirection, 1)` — a horizontal mirror of the catcher body about
+        its own centreline. Our sprite shader scales the unit quad by u_size
+        BEFORE rotation, so a NEGATIVE sprite width is exactly that mirror.
+
+        Since catcher_x_at lerps linearly between replay frames, the facing
+        over a frame span (a, b] is simply sign(b.x - a.x) when nonzero —
+        precomputed once into a sparse (time, facing) change list."""
+        changes = self._facing_changes
+        if changes is None:
+            changes = [(-(1 << 60), 1.0)]         # Direction.Right default
+            cur = 1.0
+            fs = self.frames
+            for a, b in zip(fs, fs[1:]):
+                if b.x != a.x:
+                    d = 1.0 if b.x > a.x else -1.0
+                    if d != cur:
+                        cur = d
+                        changes.append((a.time_ms, d))
+            self._facing_changes = changes
+        import bisect
+        i = bisect.bisect_right(changes, (t_ms, 2.0)) - 1
+        return changes[i][1]
+
+    def _catcher_ghost(self, scx, rgb, alpha, scale=1.0, dy=0.0,
+                       facing=1.0) -> list[Sprite]:
         """One ADDITIVE afterimage of the FULL catcher body (skin sprite, or the
         Argon bar+bumpers) at screen-x scx — the unit lazer's CatcherTrail draws
-        (CatcherTrail.body = SkinnableCatcher, Blending = Additive)."""
+        (CatcherTrail.body = SkinnableCatcher, Blending = Additive).
+        `facing` mirrors the ghost: lazer's CatcherTrailEntry snapshots
+        Catcher.BodyScale (= Scale * body.Scale, X sign = facing) at spawn
+        time, and CatcherTrailDisplay keeps that sign for the ghost's life
+        (updateCatcherTrailsScale preserves Math.Sign(oldEntry.Scale.X))."""
         ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
         if ck is not None and self.skin.has(ck):
             hb = self.catcher_w * self.skin.catcher_aspect
             return [Sprite(scx, self.plane_y + hb * 0.46 + dy,
-                           self.catcher_w * scale, hb * scale,
+                           self.catcher_w * scale * facing, hb * scale,
                            texture_key=ck,
                            color=(*rgb, alpha), additive=True)]
         from .lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
         cy = g["cy"] + dy
-        bx = (g["bar_w"] * 0.5 + g["bump_w"] * 0.5) * scale
+        # facing flips the whole body in lazer; the Argon catcher is built
+        # mirror-symmetric (see _catcher_sprites) so this is an identity —
+        # wired anyway so the argon ghost stays exactly lazer's flipped body.
+        bx = (g["bar_w"] * 0.5 + g["bump_w"] * 0.5) * scale * facing
         return [
-            Sprite(scx, cy, g["bar_w"] * scale, g["bar_h"] * scale,
+            Sprite(scx, cy, g["bar_w"] * scale * facing, g["bar_h"] * scale,
                    texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
-            Sprite(scx - bx, cy, g["bump_w"] * scale, g["bump_h"] * scale,
+            Sprite(scx - bx, cy, g["bump_w"] * scale * facing, g["bump_h"] * scale,
                    texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
-            Sprite(scx + bx, cy, g["bump_w"] * scale, g["bump_h"] * scale,
+            Sprite(scx + bx, cy, g["bump_w"] * scale * facing, g["bump_h"] * scale,
                    texture_key="argon_bar_cap", color=(*rgb, alpha), additive=True),
         ]
 
@@ -943,7 +987,11 @@ class CatchSim:
             # trail on the live flag made all 30 ghosts strobe together (the
             # "jittery" bug). Per-instant keying = ghosts fade out smoothly.
             if was_dashing:
-                out.extend(self._catcher_ghost(self._sx(px), trail_rgb, alpha))
+                # ghost keeps the facing it had when it was SPAWNED (lazer
+                # stores Catcher.BodyScale in the CatcherTrailEntry) — sample
+                # facing at the same past instant as the position.
+                out.extend(self._catcher_ghost(self._sx(px), trail_rgb, alpha,
+                                               facing=self._facing_at(t_ms - age)))
         # Hyperdash after-image: one red ghost per hyper onset (Easing.In pop).
         for h_start, _h_end in self._hyper_windows:
             age = t_ms - h_start
@@ -956,7 +1004,8 @@ class CatchSim:
                 px, _ = catcher_x_at(self.frames, h_start)
                 out.extend(self._catcher_ghost(
                     self._sx(px), self.hyper_after_rgb, alpha,
-                    scale=0.95 + 0.25 * e, dy=-10.0 * self.unit_px * e))
+                    scale=0.95 + 0.25 * e, dy=-10.0 * self.unit_px * e,
+                    facing=self._facing_at(h_start)))
         return out
 
     def _procedural_object(self, obj, x, y) -> Sprite:
@@ -974,6 +1023,15 @@ class CatchSim:
         # catcher_w), the skin supplies the sprite (fruit-catcher-idle, or
         # fruit-ryuuta for old-style skins — skin.catcher_key). The procedural
         # Argon catcher is only the base/fallback when the skin ships no catcher.
+        #
+        # FACING (community report: "the catcher never turns"): lazer mirrors
+        # the catcher body to face its direction of travel — Catcher.Update:
+        # body.Scale = new Vector2((int)VisualDirection, 1). Only the BODY
+        # flips: the caught-fruit pile (caughtObjectContainer.Scale =
+        # new Vector2(1 / Scale.X), unsigned) and the hit explosions stay
+        # unmirrored on lazer master (the old FlipCatcherPlate skin option is
+        # gone) — so _plate_stack/_catch_explosions are deliberately untouched.
+        facing = self._facing_at(t_ms) if t_ms is not None else 1.0
         ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
         if (ck is not None and self.skin.has(ck)
                 and not self.force_argon_catcher):
@@ -987,7 +1045,7 @@ class CatchSim:
                     1.0 + (hb - 1.0) * hyper_amt, 1.0)
             w = self.catcher_w
             h = w * self.skin.catcher_aspect
-            return [Sprite(x, self.plane_y + h * 0.46, w, h,
+            return [Sprite(x, self.plane_y + h * 0.46, w * facing, h,
                            texture_key=ck, color=tint)]
         # osu!lazer ArgonCatcher: a white rounded catch bar (0.8 of the catcher
         # width) + a bumper at each end of the catch range + faint side lines
@@ -1000,16 +1058,24 @@ class CatchSim:
         # the red after-image trail is the hyper cue, drawn in _dash_trail).
         col = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 1.0)
         out: list[Sprite] = []
+        # facing applies to the Argon body too (lazer flips the whole
+        # SkinnableCatcher regardless of skin) — but ArgonCatcher.cs builds a
+        # mirror-symmetric body (central circle bar, identical bumper +
+        # 20×-width side line on EACH side), so the flip is a visual identity
+        # here. Wired through regardless so this stays exactly lazer's body.
         # main catch bar
-        out.append(Sprite(x, cy, g["bar_w"], g["bar_h"],
+        out.append(Sprite(x, cy, g["bar_w"] * facing, g["bar_h"],
                           texture_key="argon_bar_cap", color=col))
         # bumpers at the ends of the catch range (flanking the 0.8 bar)
-        bx = g["bar_w"] * 0.5 + g["bump_w"] * 0.5
-        out.append(Sprite(x - bx, cy, g["bump_w"], g["bump_h"],
+        bx = (g["bar_w"] * 0.5 + g["bump_w"] * 0.5) * facing
+        out.append(Sprite(x - bx, cy, g["bump_w"] * facing, g["bump_h"],
                           texture_key="argon_bar_cap", color=col))
-        out.append(Sprite(x + bx, cy, g["bump_w"], g["bump_h"],
+        out.append(Sprite(x + bx, cy, g["bump_w"] * facing, g["bump_h"],
                           texture_key="argon_bar_cap", color=col))
-        # faint long lines out to the screen edges (alpha 0.25)
+        # faint long lines out to the screen edges (alpha 0.25) — NOT flipped:
+        # lazer's are symmetric 20×-catcher-width boxes on both sides (flip =
+        # no-op); ours reach the screen edges by construction, and mirroring
+        # their screen-space extents would break that.
         left_outer = x - g["full_w"] * 0.5
         right_outer = x + g["full_w"] * 0.5
         line_c = (1.0, 1.0 - hyper_amt, 1.0 - hyper_amt, 0.25)
