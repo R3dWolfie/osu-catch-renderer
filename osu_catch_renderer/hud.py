@@ -110,7 +110,11 @@ class DanserHud:
         # against Red's lazer captures: Night05/VOEZ/TOMAT-OS show their own
         # scorebar; a skin without one shows lazer's Argon bar.
         self.scorebar_bg = self._load_native("scorebar-bg", default_ok=False)
-        self.scorebar_col = self._load_native("scorebar-colour-0", default_ok=False)
+        # stable animates scorebar-colour-{n}; a non-animated skin ships plain
+        # scorebar-colour. Only looking for "-0" left such skins with NO fill.
+        self.scorebar_col = (
+            self._load_native("scorebar-colour-0", default_ok=False)
+            or self._load_native("scorebar-colour", default_ok=False))
         # Does the USER's skin ship its own scorebar frame? If so we composite
         # their two sprites the legacy way. If not, the DEFAULT skin's frame is
         # used only as a colour source — its art sits inside a largely
@@ -151,8 +155,14 @@ class DanserHud:
         # a clean drawn key box below (guaranteed readable over any gameplay).
         self.key_bg = self._load("inputoverlay-background", int(H * 0.052),
                                  default_ok=False)
-        self.key_img = self._load("inputoverlay-key", int(H * 0.042),
-                                  default_ok=False)
+        # NATIVE LOGICAL size (@2x halved), like every legacy sprite: stable/
+        # lazer draw inputoverlay-key at texture size in the 768-tall HUD space
+        # (LegacyKeyCounter: fixed 48x46 cell, sprite centred ON it, free to
+        # overlap the neighbours). Skins pad the button art with transparency
+        # to centre it on the overlay bar — squeezing the whole padded canvas
+        # into the key cell shrank the visible button (~58% coverage on padded
+        # sprites), which read as a blown-up gap between the stacked keys.
+        self.key_img = self._load_native("inputoverlay-key", default_ok=False)
         # The skin's OWN lazer HUD arrangement (MainHUDComponents.json), when it
         # ships one. Empty dict -> default legacy placement below.
         from .lazer_hud import load_layout
@@ -495,44 +505,106 @@ class DanserHud:
             return (v, v, v)                               # white -> black
         return (255, 255, 255)
 
-    def _draw_legacy_health(self, img, hp: float, t: float = 0.0) -> None:
-        """LegacyHealthDisplay (NEW STYLE — the classic default skin ships
-        scorebar-marker, so new style is what a skin without its own scorebar
-        gets; it is NOT the Argon bar).
+    def _hp_scaled(self, name: str, im, k: float):
+        """`im` scaled by k, cached — the scorebar art is static, so the
+        (possibly full-screen) LANCZOS resize happens once per render, not per
+        frame."""
+        cache = getattr(self, "_hp_scaled_cache", None)
+        if cache is None:
+            cache = self._hp_scaled_cache = {}
+        key = (name, round(k, 5))
+        out = cache.get(key)
+        if out is None:
+            out = im.resize((max(1, int(round(im.width * k))),
+                             max(1, int(round(im.height * k)))), Image.LANCZOS)
+            cache[key] = out
+        return out
 
-        Geometry in display units: bg 695x44; fill 645x10 at (12.0, 12.48) with
-        the colour texture CROPPED from the right (never scaled); marker 24x24
-        centred at (12 + fillWidth, 17.48).
+    def _hp_ki(self) -> dict:
+        """Marker art, loaded ONCE (a per-frame _resolve miss re-scans the whole
+        skin dir case-insensitively — ~55ms/frame on the NAS mount)."""
+        cache = getattr(self, "_hp_ki_cache", None)
+        if cache is None:
+            cache = self._hp_ki_cache = {
+                n: self._load_native(f"scorebar-{n}", default_ok=False)
+                for n in ("marker", "ki", "kidanger", "kidanger2")}
+        return cache
+
+    def _hp_marker(self, hp: float):
+        """The skin's own HP-marker art: scorebar-marker (new style), else
+        scorebar-ki / -kidanger (<50%) / -kidanger2 (<20%) (old style, lazer's
+        LegacyOldStyleMarker cutoffs). None when the skin ships no marker art
+        at all. USER SKIN ONLY, like the rest of the scorebar."""
+        cache = self._hp_ki()
+        if cache["marker"] is not None:
+            return cache["marker"]
+        if hp < 0.2:
+            return cache["kidanger2"] or cache["kidanger"] or cache["ki"]
+        if hp < 0.5:
+            return cache["kidanger"] or cache["ki"]
+        return cache["ki"]
+
+    def _draw_legacy_health(self, img, hp: float, t: float = 0.0) -> None:
+        """LegacyHealthDisplay.
+
+        SKIN SPRITES AT NATIVE LOGICAL SIZE: lazer's legacy HUD lives in a
+        DrawSizePreservingFillContainer targeting 1024x768, so one logical
+        texture px (@2x art halved) == screen_h/768 px, and scorebar-bg sits
+        UNSCALED at the component's top-left. Skins rely on that to paint
+        full-canvas HUD frames — e.g. a 1378x786 scorebar-bg whose art covers
+        the whole 768p screen (corner shards, right-edge key-overlay arrows).
+        The old behaviour stretched the bg to a 695-display-unit "bar", which
+        crushed such full-canvas art into the top-left quadrant and smeared
+        its decorations over the playfield.
+
+        Fill: scorebar-colour(-0) at (3,10)*1.6 old style / (7.5,7.8)*1.6 new
+        style (new style == the skin ships scorebar-marker; lazer's
+        LegacyHealthDisplay offsets), CROPPED from the right by hp, never
+        scaled. Marker centred on the fill's end — old style on the fill's top
+        edge, new style on its centreline — using the skin's own marker art
+        via _hp_marker; a 1x1 blank ki (how skins hide the marker) therefore
+        shows nothing, and only a skin with a scorebar but no ki/marker art at
+        all falls back to the drawn glowing ball.
+
+        A skin with NO scorebar keeps the classic-default drawn look
+        (geometry in display units: bg 695x44; fill 645x10 at (12.0, 12.48);
+        glowing-ball marker centred at (12 + fillWidth, 17.48)).
         """
         hp = max(0.0, min(1.0, hp))
         k = self.h / 768.0
         c = self._comp("LegacyHealthDisplay")
         if c is not None:
             k *= c.scale[1]
-        bg_w, bg_h = 695.0 * k, 44.0 * k
-        x0, y0 = self._place("LegacyHealthDisplay", bg_w, bg_h, (0, 0))
-        fx, fy = x0 + 12.0 * k, y0 + 12.48 * k
-        fw_max, fh = 645.0 * k, 10.0 * k
-        fw = fw_max * hp
         col = self._legacy_fill_colour(hp)
+        marker_sprite = None
 
         if self.scorebar_bg is not None:
-            # the skin's own sprites, at one shared scale off the bg's width
-            sk = bg_w / max(1, self.scorebar_bg.width)
-            bg = self.scorebar_bg.resize(
-                (max(1, int(self.scorebar_bg.width * sk)),
-                 max(1, int(self.scorebar_bg.height * sk))), Image.LANCZOS)
+            # the skin's own scorebar, legacy-native geometry
+            bg = self._hp_scaled("bg", self.scorebar_bg, k)
+            x0, y0 = self._place("LegacyHealthDisplay", bg.width, bg.height,
+                                 (0, 0))
             self._paste(img, bg, int(x0), int(y0))
+            new_style = self._hp_ki()["marker"] is not None
+            fpx, fpy = (7.5, 7.8) if new_style else (3.0, 10.0)
+            fx, fy = x0 + fpx * 1.6 * k, y0 + fpy * 1.6 * k
+            fw, fh = 0.0, 0.0
             if self.scorebar_col is not None:
-                cimg = self.scorebar_col.resize(
-                    (max(1, int(self.scorebar_col.width * sk)),
-                     max(1, int(self.scorebar_col.height * sk))), Image.LANCZOS)
-                cw = max(1, int(cimg.width * hp))
-                self._paste(img, cimg.crop((0, 0, cw, cimg.height)),
-                            int(fx), int(fy))
-                fw = cimg.width * hp
+                cimg = self._hp_scaled("colour", self.scorebar_col, k)
+                cw = int(cimg.width * hp)
+                if cw > 0:
+                    self._paste(img, cimg.crop((0, 0, cw, cimg.height)),
+                                int(fx), int(fy))
+                fw, fh = cimg.width * hp, float(cimg.height)
+            mx = fx + fw
+            my = fy + (fh / 2.0 if new_style else 0.0)
+            marker_sprite = self._hp_marker(hp)
         else:
-            # classic-default look, drawn to the same geometry
+            # classic-default look, drawn to the display-unit geometry
+            bg_w, bg_h = 695.0 * k, 44.0 * k
+            x0, y0 = self._place("LegacyHealthDisplay", bg_w, bg_h, (0, 0))
+            fx, fy = x0 + 12.0 * k, y0 + 12.48 * k
+            fw_max, fh = 645.0 * k, 10.0 * k
+            fw = fw_max * hp
             d = ImageDraw.Draw(img)
             r = bg_h / 2.0
             d.rounded_rectangle([x0, y0 + bg_h * 0.18, x0 + bg_w, y0 + bg_h * 0.82],
@@ -540,6 +612,7 @@ class DanserHud:
             if fw > 1:
                 fr = fh / 2.0
                 d.rounded_rectangle([fx, fy, fx + fw, fy + fh], radius=fr, fill=col)
+            mx, my = fx + fw, y0 + 17.48 * k
         # marker BULGE: on any HP GAIN the marker snaps to 1.2x then eases to
         # 0.8x over 150ms and RESTS at 0.8 (lazer's actual behaviour, kept).
         prev = getattr(self, "_hp_prev", None)
@@ -553,8 +626,17 @@ class DanserHud:
             age = t - bt
             mscale = (1.2 if age <= 0 else
                       (1.2 + (0.8 - 1.2) * (age / 150.0) if age < 150.0 else 0.8))
+        if self.scorebar_bg is not None:
+            if marker_sprite is not None:
+                # the skin's own marker art (possibly a deliberate 1x1 blank)
+                mw = max(1, int(round(marker_sprite.width * k * mscale)))
+                mh = max(1, int(round(marker_sprite.height * k * mscale)))
+                m = (marker_sprite if (mw, mh) == marker_sprite.size
+                     else marker_sprite.resize((mw, mh), Image.LANCZOS))
+                self._paste(img, m, int(mx - mw / 2.0), int(my - mh / 2.0))
+                return
+            # skin scorebar without any marker art -> the drawn ball below
         # marker: glowing ball centred on the fill's right edge
-        mx, my = fx + fw, y0 + 17.48 * k
         mr = 12.0 * k * mscale
         layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
         ld = ImageDraw.Draw(layer)
@@ -796,10 +878,28 @@ class DanserHud:
             # catch has 3 keys, so the DASH key (B3) flashes magenta.
             act = (0xFF, 0xDE, 0x00) if i < 2 else (0xF8, 0x00, 0x9E)
             if self.key_img is not None:
+                # Draw at NATIVE LOGICAL size * (H/768), centred on the cell —
+                # what stable/lazer do (see the key_img load comment). CACHED
+                # per pressed-state: only two sizes ever exist. Oversized art
+                # is clamped so a rogue sprite can never cover the playfield.
                 s = 0.88 if held[i] else 1.0   # pressed keys shrink (stable)
-                side = max(1, int(ks * s))
-                key = self.key_img.resize((side, side), Image.LANCZOS)
-                self._paste(img, key, x0 + (ks - side) // 2, ky + (ks - side) // 2)
+                cache = getattr(self, "_kc_key_cache", None)
+                if cache is None:
+                    cache = self._kc_key_cache = {}
+                key = cache.get(s)
+                if key is None:
+                    kw = self.key_img.width * kk
+                    kh = self.key_img.height * kk
+                    cap = ks * 2.0
+                    if max(kw, kh) > cap:
+                        f = cap / max(kw, kh)
+                        kw, kh = kw * f, kh * f
+                    key = self.key_img.resize(
+                        (max(1, int(kw * s)), max(1, int(kh * s))),
+                        Image.LANCZOS)
+                    cache[s] = key
+                self._paste(img, key, x0 + (ks - key.width) // 2,
+                            ky + (ks - key.height) // 2)
             elif dark_box:
                 # dark neutral box so the skin's LIGHT glyphs read; held state
                 # keeps the accent as a full-strength outline + a muted fill
