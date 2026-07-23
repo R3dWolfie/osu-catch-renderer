@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .assets import build_textures
 from .beatmap import parse_beatmap
+from .flashlight import CatchFlashlight, has_flashlight
 from .gl import SpriteRenderer
 from .models import RenderConfig, ar_to_preempt_ms
 from .replay import parse_replay
@@ -445,9 +446,23 @@ def render_core(
     writer = _FrameWriter(proc)
     pending = deque()          # scene snapshots awaiting their pixels
 
+    # osu!catch Flashlight (FL, mod bit 1<<10): a soft-edged black vignette
+    # centred on the catcher plate that shrinks with combo (see flashlight.py for
+    # the ported lazer values). Post-pass over the composited playfield BEFORE the
+    # HUD draws, so score/acc/combo/break overlays stay lit — lazer keeps the
+    # Flashlight in the playfield layer with the HUD above it. Single renders only
+    # (a versus overlay has many catchers); strictly gated on the FL bit, so
+    # non-FL replays render byte-identically.
+    fl = None
+    if has_flashlight(getattr(meta, "mods", 0)) and not overlay_extra:
+        fl = CatchFlashlight(break_env=getattr(sim, "_break_env", None))
+
     def _emit_gameplay(raw):
         nonlocal last_gameplay
-        out = hud.overlay(raw, pending.popleft())
+        scene = pending.popleft()
+        if fl is not None:
+            raw = fl.apply(raw, scene)
+        out = hud.overlay(raw, scene)
         last_gameplay = out
         writer.push(out)
 
