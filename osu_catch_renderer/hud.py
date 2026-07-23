@@ -217,6 +217,16 @@ class DanserHud:
                   or [first_ms])
         self.argon = ArgonHud(self.w, self.h, first_ms, self.last_ms,
                               density=density_buckets(starts, starts))
+        # lazer's BreakOverlay (countdown + progress bar + CURRENT PROGRESS
+        # info + slide-in chevrons) — break_overlay.py, a 1:1 port of
+        # osu.Game/Screens/Play/BreakOverlay.cs. Drawn on BOTH HUD paths:
+        # stable has no equivalent panel and the owner wants the lazer look
+        # on skinned renders too, so it's deliberately lazer-styled always
+        # (independent of --letterbox-breaks, which lazer doesn't gate on).
+        from .break_overlay import LazerBreakOverlay
+        self.break_overlay = LazerBreakOverlay(
+            self.w, self.h, getattr(beatmap, "breaks", None) or [],
+            mods=int(getattr(meta, "mods", 0) or 0))
 
     # --- public ---------------------------------------------------------------
 
@@ -310,6 +320,11 @@ class DanserHud:
                 top_l += (max(im.height for im in self.mod_imgs) / ah.lk
                           + 8.0 * ah.es)
             ah.draw_hit_counter(img, scene.counts, top_l)
+
+        # lazer z-order: BreakOverlay is a LATER overlay-component child than
+        # HUDOverlay (Player.createOverlayComponents), so it composites above
+        # every HUD element. Watermark stays topmost (house element).
+        self.break_overlay.draw(img, t, scene.accuracy)
 
         self._draw_watermark(img)
         return np.asarray(img)
@@ -550,6 +565,11 @@ class DanserHud:
             if getattr(cfg, "show_hit_counter", False):
                 ah.draw_hit_counter(img, scene.counts, stack_y / ah.lk,
                                     right_l=right_l)
+        # lazer BreakOverlay — SAME lazer-styled overlay as the argon path
+        # (deliberate: stable has no break panel; owner wants THIS look on
+        # skinned renders too). Above the HUD, per lazer's overlay z-order.
+        self.break_overlay.draw(img, t, scene.accuracy)
+
         # watermark (bottom-right)
         self._draw_watermark(img)
         return np.asarray(img)
