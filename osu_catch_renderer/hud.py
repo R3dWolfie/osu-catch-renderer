@@ -1033,37 +1033,59 @@ class DanserHud:
         fades out over 300 ms; the glyph pops 1.5 -> 0.8 (250 ms OutQuad) then
         1.0 -> 1.1 (60 ms) -> 1.0 (30 ms). Combo 0 fades out over 400 ms.
         """
+        # ALPHA is SOLID while the combo is alive — fade IN once when the
+        # combo starts (0 -> positive) and OUT only when it breaks
+        # (positive -> 0). catch increments the combo on EVERY caught fruit
+        # (many per second), so the previous "reset the fade-in on each
+        # increment + fade out after a 1000ms hold" made the counter flash /
+        # blink between catches (community report 2026-07-24). The size POP
+        # still fires per increment (lazer LegacyCatchComboCounter), decoupled
+        # from alpha via its own timer.
         combo = max(int(getattr(scene, "combo", 0)), 0)
         prev = getattr(self, "_combo_prev", None)
-        if prev is None or combo != prev:
-            if prev is not None and combo > prev:
-                self._combo_t = t
-            elif combo == 0:
-                self._combo_t = None
+        if prev != combo:
+            if combo > (prev or 0):
+                self._combo_pop_t = t                    # per-increment pop
+                if not prev:
+                    self._combo_appear_t = t             # start-of-combo fade-in
+                self._combo_last_pos = combo
+                self._combo_break_t = None
+            elif combo == 0 and prev:
+                self._combo_break_t = t                  # begin fade-out
             self._combo_prev = combo
-        ct = getattr(self, "_combo_t", None)
-        if not combo or ct is None:
-            return
-        age = t - ct
-        if age < 0:
-            return
-        # fade in -> hold 1000 -> fade out 300
-        if age < 60.0:
-            alpha = age / 60.0
-        elif age < 1000.0:
-            alpha = 1.0
-        elif age < 1300.0:
-            alpha = 1.0 - (age - 1000.0) / 300.0
+
+        appear_t = getattr(self, "_combo_appear_t", None)
+        break_t = getattr(self, "_combo_break_t", None)
+        last_pos = getattr(self, "_combo_last_pos", 0)
+
+        if combo > 0:
+            draw_combo = combo
+            a = (t - appear_t) if appear_t is not None else 1e9
+            if a < 0:
+                return
+            alpha = min(1.0, a / 60.0)                    # 60ms fade-in, then solid
+        elif break_t is not None and last_pos > 0:
+            draw_combo = last_pos                         # fade the last number out
+            fo = t - break_t
+            if fo < 0 or fo >= 400.0:
+                return
+            alpha = 1.0 - fo / 400.0                      # lazer: combo 0 -> 400ms
         else:
             return
-        # pop: 1.5 -> 0.8 over 250ms (OutQuad), then 1.0 -> 1.1 -> 1.0
-        if age <= 250.0:
-            u = age / 250.0
+
+        # pop: 1.5 -> 0.8 over 250ms (OutQuad), then 1.0 -> 1.1 -> 1.0, driven by
+        # the last increment (settles to 1.0; during fade-out it's already 1.0).
+        pop_t = getattr(self, "_combo_pop_t", None)
+        page = (t - pop_t) if pop_t is not None else 1e9
+        if page < 0:
+            page = 1e9
+        if page <= 250.0:
+            u = page / 250.0
             scale = 1.5 + (0.8 - 1.5) * (1.0 - (1.0 - u) ** 2)
-        elif age <= 310.0:
-            scale = 1.0 + 0.1 * ((age - 250.0) / 60.0)
-        elif age <= 340.0:
-            scale = 1.1 - 0.1 * ((age - 310.0) / 30.0)
+        elif page <= 310.0:
+            scale = 1.0 + 0.1 * ((page - 250.0) / 60.0)
+        elif page <= 340.0:
+            scale = 1.1 - 0.1 * ((page - 310.0) / 30.0)
         else:
             scale = 1.0
         cg = self.combo_glyphs or self.score_glyphs
@@ -1076,7 +1098,7 @@ class DanserHud:
         # changes — the same image was rebuilt every frame. The fade below
         # works on a copy so the cached image stays pristine. Same inputs ->
         # same bytes as the per-frame rebuild.
-        _ck = (combo, th)
+        _ck = (draw_combo, th)
         _cm = getattr(self, "_combo_num_memo", None)
         if _cm is not None and _cm[0] == _ck:
             txt = _cm[1]
@@ -1084,7 +1106,7 @@ class DanserHud:
                 return
             tw = txt.width
         else:
-            txt = self._number(str(combo), cg, self._combo_overlap())
+            txt = self._number(str(draw_combo), cg, self._combo_overlap())
             if txt.width < 1 or txt.height < 1:
                 self._combo_num_memo = (_ck, None)
                 return
