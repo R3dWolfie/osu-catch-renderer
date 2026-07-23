@@ -1833,10 +1833,14 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
 
     # catch judgment row: Fruit / Drop / Droplet / Miss, colour-coded (droplet
     # = lb_cards.RESULT_COLORS light blue, not gray — 2026-07-22 polish)
-    cells = [("Fruit", meta.count_300, (255, 230, 120)),
-             ("Drop", meta.count_100, (140, 220, 140)),
-             ("Droplet", meta.count_50, (153, 219, 255)),
-             ("Miss", meta.count_miss + meta.count_katu, (240, 80, 80))]
+    # Miss = count_miss ONLY (tiny-droplet misses are not misses in either
+    # client); missed tinies stay visible via the Droplet caught/total cell.
+    cells = [("Fruit", str(meta.count_300), (255, 230, 120)),
+             ("Drop", str(meta.count_100), (140, 220, 140)),
+             ("Droplet",
+              (f"{meta.count_50}/{meta.count_50 + meta.count_katu}"
+               if meta.count_katu else str(meta.count_50)), (153, 219, 255)),
+             ("Miss", str(meta.count_miss), (240, 80, 80))]
     f36 = _font(36)
     rendered = [(f"{lab}: {cnt}", col) for lab, cnt, col in cells]
     widths = [d.textbbox((0, 0), t, font=f36)[2] for t, _ in rendered]

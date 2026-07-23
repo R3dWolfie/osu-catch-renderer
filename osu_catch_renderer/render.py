@@ -24,7 +24,7 @@ from .beatmap import parse_beatmap
 from .gl import SpriteRenderer
 from .models import RenderConfig, ar_to_preempt_ms
 from .replay import parse_replay
-from .scene import CatchSim
+from .scene import CatchSim, mods_score_multiplier
 
 
 class CatchRenderError(RuntimeError):
@@ -248,6 +248,60 @@ def render_core(
             + [n for (_f, _m, n) in overlay_extra],
             gray_keys=_overlay_gray_keys, catcher_keys=catcher_keys,
             catcher_aspects=catcher_aspects)
+
+    # ── SCORE FIDELITY: one lazer-standardised scale everywhere ─────────────
+    # The .osr header total means different things per source (stable ScoreV1,
+    # osu-web legacy export of a lazer play, lazer classic display, lazer
+    # standardised). score_fidelity converts the header under every
+    # interpretation with lazer's own math and picks the one consistent with
+    # our sim; the sim's curve is then END-PINNED (std honesty pattern) so the
+    # in-video counter ENDS EXACTLY on that number, and meta.score is swapped
+    # so the results screen + leaderboard card show the same value. The
+    # authoritative total is exported via a `<output>.mp4.score.json` sidecar
+    # for the bot (renders.score_v3 → website card). Fail-soft: any problem
+    # leaves the sim un-pinned and the header score displayed as before.
+    score_fid: dict | None = None
+    if osu_path is not None:
+        try:
+            from .score_fidelity import (compute_candidates,
+                                         resolve_authoritative)
+
+            def _pin(one_sim, one_meta):
+                final = (one_sim._checkpoints[-1].score
+                         if one_sim._checkpoints else 0)
+                fid = compute_candidates(
+                    one_meta, bm.objects, osu_path,
+                    mods_score_multiplier(getattr(one_meta, "mods", 0) or 0))
+                val, src = resolve_authoritative(fid, final)
+                if final > 0 and val > 0:
+                    one_sim.score_scale = val / final
+                fid.pop("legacy_attrs", None)
+                fid.pop("osu_facts", None)
+                fid.update({"score_v3": int(val), "source": src,
+                            "sim_final": int(final),
+                            "player": getattr(one_meta, "player_name", "")})
+                return fid
+
+            score_fid = _pin(base_sim, meta)
+            score_fid["players"] = [dict(score_fid)]
+            if overlay_extra:
+                for _es, (_f, _mt, _n) in zip(extra_sims, overlay_extra):
+                    _pf = _pin(_es, _mt)
+                    _pf["player"] = _pf["player"] or _n
+                    score_fid["players"].append(_pf)
+            import dataclasses as _dc
+            import sys as _sfsys
+            print(f"[catch] score fidelity: header={meta.score:,} -> "
+                  f"standardised {score_fid['score_v3']:,} "
+                  f"(source={score_fid['source']}, "
+                  f"sim_final={score_fid['sim_final']:,})",
+                  file=_sfsys.stderr, flush=True)
+            meta = _dc.replace(meta, score=int(score_fid["score_v3"]))
+        except Exception as _sf_e:  # noqa: BLE001 — never break a render
+            import sys as _sfsys
+            print(f"[catch] score fidelity FAILED (header score kept): "
+                  f"{_sf_e}", file=_sfsys.stderr, flush=True)
+            score_fid = None
     if cfg.show_pp_counter and osu_path is not None:
         sim.compute_pp_curve(osu_path, meta.mods)
     preempt = ar_to_preempt_ms(bm.ar)
@@ -471,6 +525,18 @@ def render_core(
         raise CatchRenderError(f"ffmpeg exited {ret}\n{tail}")
     if not output_path.exists() or output_path.stat().st_size < 8_000:
         raise CatchRenderError("output too small / missing — render likely failed")
+    # score-fidelity sidecar: `<output>.score.json` next to the mp4 — the bot
+    # (cli/r3d_render.py) reads it into the completion marker so the website
+    # card stores/displays the SAME standardised total the counter ended on.
+    if score_fid is not None:
+        try:
+            import json as _json
+            sidecar = Path(str(output_path) + ".score.json")
+            sidecar.write_text(_json.dumps(
+                {"schema": 1, "mode": 2, **score_fid}, default=str))
+        except Exception as _sc_e:  # noqa: BLE001 — sidecar is best-effort
+            print(f"[catch] score sidecar write failed: {_sc_e}",
+                  file=sys.stderr, flush=True)
     if progress_callback:
         progress_callback(100)
     return output_path

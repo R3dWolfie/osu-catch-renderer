@@ -33,8 +33,9 @@ CATCH ADAPTATIONS (owner spec, honest + documented):
     not a deviation). Catch's tight top bands crowd the B/A/S/SS badges, so
     the badge pills are slightly smaller + slightly further out than std's
     (0.072/0.046 @ r 0.445 vs 0.088/0.050 @ r 0.435) to keep S/SS legible.
-  * judgments are catch's: FRUIT / DROP / DROPLET / MISS (miss folds in
-    count_katu = missed tiny droplets, exactly as the gameplay HUD counts it),
+  * judgments are catch's: FRUIT / DROP / DROPLET / MISS (MISS = count_miss
+    only — tiny-droplet misses are not misses in either client; they show as
+    the DROPLET cell's caught/total instead),
     coloured with the same palette as the flank cards (lb_cards.RESULT_COLORS)
     so the whole screen reads as one UI. No slider tick/end rows — catch has
     no such concept (std's grid_c is omitted).
@@ -955,7 +956,11 @@ class CatchLazerResults:
         self.grade = catch_grade(self.acc_frac)
         self.grade_rgb = FOR_RANK.get(self.grade, (0.8, 0.8, 0.85))
         self.target_arc = target_arc_value(self.acc_frac, self.grade)
-        self.miss_display = meta.count_miss + meta.count_katu
+        # MISS = fruit + large-droplet misses ONLY (count_miss). Tiny-droplet
+        # misses (count_katu) are NOT misses in either client — folding them
+        # in showed 26 when the game showed 10 (owner repro 2026-07-23). The
+        # missed tinies stay visible via the DROPLET caught/total cell below.
+        self.miss_display = meta.count_miss
         self.stars, self.pp, self.max_pp = _compute_stars_pp(
             osu_path, meta.mods, meta)
 
@@ -1052,7 +1057,10 @@ class CatchLazerResults:
         grid_b = [
             ("FRUIT", str(m.count_300), CATCH_RESULT_COLORS["FRUIT"]),
             ("DROP", str(m.count_100), CATCH_RESULT_COLORS["DROP"]),
-            ("DROPLET", str(m.count_50), CATCH_RESULT_COLORS["DROPLET"]),
+            ("DROPLET",
+             (f"{m.count_50}/{m.count_50 + m.count_katu}"
+              if m.count_katu else str(m.count_50)),
+             CATCH_RESULT_COLORS["DROPLET"]),
             ("MISS", str(self.miss_display), CATCH_RESULT_COLORS["MISS"]),
         ]
         self.grid_a = [self._grid_cell(lbl, val, col) for lbl, val, col in grid_a]

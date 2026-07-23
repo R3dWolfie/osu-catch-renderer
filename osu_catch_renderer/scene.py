@@ -316,35 +316,49 @@ class CatchSim:
             self._reconcile_combo_runs(objs, margin, m)
 
         # --- pass 2: lazer-standardised ScoreV3 from reconciled catches ------
-        # Base numerics per catch judgement: Fruit=Great=300, Droplet=
-        # LargeTick=30 (both AFFECT COMBO + accuracy), TinyDroplet=SmallTick=10
-        # (accuracy only, NO combo). combo_portion += base·√combo — the
-        # power-based curve of the current lazer ScoreProcessor, NOT the old
-        # log-based ScoreV2 the renderer used to scale to meta.score. The
-        # 500k combo / 500k accuracy split is then ×mod-multiplier.
-        # Banana-shower bonus IS modelled: each caught banana adds a
-        # LargeBonus (+50) to the bonus portion (see the BANANA branch),
-        # exactly like lazer's ScoreProcessor — banana-only maps score
-        # 50/banana instead of flat-lining at 0.
-        _BASE = {ObjType.FRUIT: 300.0, ObjType.DROPLET: 30.0,
-                 ObjType.TINY_DROPLET: 10.0}
+        # EXACT CatchScoreProcessor model (ppy/osu master 2026-07,
+        # osu.Game.Rulesets.Catch/Scoring/CatchScoreProcessor.cs):
+        #   fruitTinyScale = maxTiny / (maxTiny + maxFruit)  — large droplets
+        #     are *purposefully* not counted (CatchScoreProcessor.Reset)
+        #   comboPortion    = 1e6 − 400k·fruitTinyScale
+        #   dropletsPortion = 400k·fruitTinyScale
+        #   total = comboPortion·comboProgress + dropletsPortion·dropletsHit
+        #           + bonusPortion, then × mod multiplier (ScoreProcessor
+        #           .updateScore: TotalScore = round(TSWM × scoreMultiplier))
+        #   combo change (GetComboScoreChange): Fruit +300·w, Droplet
+        #     (LargeTickHit) +100·w, w = clamp(log₄(comboAfter), 0.5, log₄200)
+        #   bonus (GetBaseScoreForResult): caught banana LargeBonus = +200
+        # The previous sim here used the OSU processor's shape (500k/500k
+        # split, √combo, acc⁵, +50 bananas) and ran 5%+ off on real plays.
+        # The curve is additionally END-PINNED by render.py to the exact
+        # converted header total (score_fidelity), so trajectory AND final
+        # value both match what lazer/the osu! website shows.
+        def _combo_w(c: int) -> float:
+            if c <= 1:
+                return 0.5
+            return min(max(0.5, math.log(c, self._COMBO_BASE)), log_cap)
+
+        _COMBO_CHANGE = {ObjType.FRUIT: 300.0, ObjType.DROPLET: 100.0}
         _combo_kinds = (ObjType.FRUIT, ObjType.DROPLET)
+        max_fruit = sum(1 for o in objs if o.kind is ObjType.FRUIT)
+        max_tiny = sum(1 for o in objs if o.kind is ObjType.TINY_DROPLET)
+        _ft_div = max_tiny + max_fruit
+        _fruit_tiny_scale = (max_tiny / _ft_div) if _ft_div else 0.0
+        _combo_budget = 1_000_000.0 - 400_000.0 * _fruit_tiny_scale
+        _droplets_budget = 400_000.0 * _fruit_tiny_scale
         max_combo_portion = 0.0
-        max_base_total = 0.0
         _pc = 0
         for obj in objs:
-            max_base_total += _BASE.get(obj.kind, 0.0)
             if obj.kind in _combo_kinds:
                 _pc += 1
-                max_combo_portion += _BASE[obj.kind] * (_pc ** 0.5)
+                max_combo_portion += _COMBO_CHANGE[obj.kind] * _combo_w(_pc)
         _mod_mult = mods_score_multiplier(getattr(self.meta, "mods", 0) or 0)
 
         combo = max_combo = 0
         hp = 1.0
         c300 = c100 = c50 = ckatu = cmiss = ctiny_miss = 0
         combo_portion = 0.0
-        cur_base = cur_max_base = 0.0
-        bonus = 0.0   # banana LargeBonus: +50 per caught banana (lazer ScoreV3)
+        bonus = 0.0   # banana LargeBonus: +200 per caught banana (lazer ScoreV3)
         pending_hyper: int | None = None
         pending_target: float | None = None
         import random as _random
@@ -352,9 +366,7 @@ class CatchSim:
         _pile_placed: list = []                # (offset_x, offset_y) already placed
         _pile_adj = 128.0 * self.obj_scale * (10.0 / 64.0)   # jitter radius, osu units
         for obj, caught in zip(objs, self._caught):
-            cur_max_base += _BASE.get(obj.kind, 0.0)
             if obj.kind in (ObjType.FRUIT, ObjType.DROPLET):
-                base = _BASE[obj.kind]
                 if pending_hyper is not None:
                     # lazer ends the hyperdash the INSTANT the catcher reaches the
                     # target x (SetHyperDashState clears on arrival), NOT at the
@@ -377,8 +389,7 @@ class CatchSim:
                 if caught:
                     combo += 1
                     max_combo = max(max_combo, combo)
-                    combo_portion += base * (combo ** 0.5)
-                    cur_base += base
+                    combo_portion += _COMBO_CHANGE[obj.kind] * _combo_w(combo)
                     hp = min(1.0, hp + 0.025)
                     if obj.kind is ObjType.FRUIT:
                         c300 += 1
@@ -430,15 +441,15 @@ class CatchSim:
             elif obj.kind is ObjType.TINY_DROPLET:
                 if caught:
                     c50 += 1
-                    cur_base += _BASE[ObjType.TINY_DROPLET]
                 else:
                     ctiny_miss += 1
             elif obj.kind is ObjType.BANANA and caught:
                 # lazer standardised scoring counts each caught banana as a
-                # LargeBonus (+50) in the BONUS portion of the total — on
-                # banana-only maps ("Endless Spinner") this is the ENTIRE
-                # score, and the old sim held the HUD at 0 the whole render.
-                bonus += 50.0
+                # LargeBonus (+200 — CatchScoreProcessor.GetBaseScoreForResult
+                # overrides the default 50) in the BONUS portion of the total —
+                # on banana-only maps ("Endless Spinner") this is the ENTIRE
+                # score beyond the empty combo portion.
+                bonus += 200.0
                 _cxl, _ = catcher_x_at(self.frames, obj.time_ms)
                 self._light_events.append(
                     (obj.time_ms, obj.x - _cxl, "banana",
@@ -451,7 +462,7 @@ class CatchSim:
                 # so a shower looked like it rained straight through. lazer's
                 # Catcher explodes a caught banana off the plate IMMEDIATELY
                 # (bananas never persist in the pile; no combo/hp change,
-                # LargeBonus +50 not modelled — see note above). clear_time is
+                # LargeBonus +200 modelled in the branch above). clear_time is
                 # pre-set to the catch time so the group pass below leaves it
                 # alone, and anim="banana" routes the burst to the banana
                 # sprite. Skin-gated: the certified argon path stays
@@ -461,15 +472,17 @@ class CatchSim:
                 self._plate.append([obj.time_ms, (obj.x - cxb) * 0.55, 0.0,
                                     obj.combo_index, obj.hyperdash,
                                     obj.time_ms, "banana"])
-            # lazer standardised: (500k·acc·comboRatio + 500k·acc⁵·progress
-            # + bonusPortion) × mult — bananas contribute ONLY via bonus.
-            if max_combo_portion > 0 and max_base_total > 0 and cur_max_base > 0:
-                sacc = cur_base / cur_max_base
-                score = (500_000.0 * sacc * (combo_portion / max_combo_portion)
-                         + 500_000.0 * (sacc ** 5) * (cur_max_base / max_base_total)
-                         + bonus) * _mod_mult
-            else:
-                score = bonus * _mod_mult   # banana-only map: pure bonus
+            # lazer CatchScoreProcessor.ComputeTotalScore:
+            #   comboPortion·comboProgress + dropletsPortion·dropletsHit
+            #   + bonusPortion, × mod multiplier. comboProgress falls back
+            #   to 1 when the map has no combo-giving objects (banana-only),
+            #   exactly like ScoreProcessor.updateScore.
+            _combo_progress = ((combo_portion / max_combo_portion)
+                               if max_combo_portion > 0 else 1.0)
+            _droplets_hit = (c50 / max_tiny) if max_tiny else 0.0
+            score = (_combo_budget * _combo_progress
+                     + _droplets_budget * _droplets_hit
+                     + bonus) * _mod_mult
             caught_acc = c300 + c100 + c50
             total_acc = caught_acc + cmiss + ckatu + ctiny_miss
             acc = (caught_acc / total_acc) if total_acc else 1.0
@@ -792,7 +805,7 @@ class CatchSim:
 
         cp = self.state_at(t_ms)
         s.combo = cp.combo
-        s.score = int(cp.score * self.score_scale)
+        s.score = int(round(cp.score * self.score_scale))
         s.hp = cp.hp
         s.accuracy = max(0.0, min(1.0, cp.accuracy))
         s.pp = cp.pp
