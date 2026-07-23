@@ -117,6 +117,15 @@ GRADE_COLORS = {               # STD hud.py GRADE_COLORS (procedural badge)
     "F": (1.0, 0.353, 0.353),
 }
 
+# House HIT COUNTER (STD render/hud.py §4.6 HitCounter — the live judgment
+# rows under the top-right mod stack; constants + band colours verbatim).
+HITC_ROW_H = 19.0              # hit-counter row height (lazer px)
+HITC_LABELS = ("300", "100", "50", "X")
+BAND_300 = (0.38, 0.72, 1.00)  # STD hud.py judgment-band colours
+BAND_100 = (0.42, 0.88, 0.47)
+BAND_50 = (0.95, 0.76, 0.36)
+BAND_MISS = (0.95, 0.25, 0.30)
+
 
 # --- easing / tween (osu!framework Easing.*) ---------------------------------
 
@@ -622,20 +631,57 @@ class ArgonHud:
                       color=color, scale=scale, pivot=pivot, wire_n=n_cells)
         self._lrun(img, "COMBO", x, top, label_h, BLUE0, 0.95 * self.op)
 
-    def draw_pp(self, img, pp: float) -> None:
+    def draw_pp(self, img, pp: float, right_l: float | None = None,
+                top_l: float | None = None) -> None:
         """Catch's house pp counter, restyled to the Argon block grammar:
-        'PP' label + a 0.6-height segment run under the accuracy block."""
+        'PP' label + a 0.6-height segment run under the accuracy block.
+        `right_l`/`top_l` (lazer px) re-anchor the block into the SKINNED
+        layout's top-right stack; defaults keep the Argon position exactly.
+        Block height = (ARGON_LABEL_GAP + ARGON_DIGIT_H*0.6)*es for
+        callers that stack further elements below."""
         es = self.es
         text = f"{max(pp, 0.0):.0f}"
         h = ARGON_DIGIT_H * es * 0.6
-        right = self.ui_w_l + ARGON_ACC_POS[0] * es
-        top = (ARGON_ACC_POS[1] + ARGON_LABEL_GAP + ARGON_DIGIT_H
-               + 10.0) * es
+        right = (self.ui_w_l + ARGON_ACC_POS[0] * es
+                 if right_l is None else right_l)
+        top = ((ARGON_ACC_POS[1] + ARGON_LABEL_GAP + ARGON_DIGIT_H
+                + 10.0) * es
+               if top_l is None else top_l)
         num_top = top + ARGON_LABEL_GAP * es
         self._seg_run(img, text, right, num_top, h, 0.95 * self.op)
         lw = self._lrun_width("PP", ARGON_LABEL_H * es)
         self._lrun(img, "PP", right - lw, top, ARGON_LABEL_H * es, BLUE0,
                    0.95 * self.op)
+
+    def draw_hit_counter(self, img, counts, top_l: float,
+                         right_l: float | None = None) -> None:
+        """STD's house HIT COUNTER (render/hud.py _hit_counter), ported 1:1
+        onto catch's PIL compositing: live per-judgment rows — the count in
+        mono white, the band-coloured judgment label to its left — right-
+        aligned under the top-right mod stack. Catch's judgment classes fill
+        the house rows: 300 = fruits, 100 = large droplets, 50 = tiny
+        droplets, X = misses (scene counts[4]; counts[3] is the tiny-droplet
+        misses — stable's katu — which the house counter does not row, same
+        as it ignores katu/geki on std). `top_l` in lazer px; `right_l`
+        overrides the right edge (default = STD's ui_w_l - 20)."""
+        es = self.es
+        vals = (int(counts[0]), int(counts[1]), int(counts[2]),
+                int(counts[4]))
+        colors = (BAND_300, BAND_100, BAND_50, BAND_MISS)
+        row_h = HITC_ROW_H * es
+        text_h = row_h * 0.78
+        right = (self.ui_w_l - 20.0 * es) if right_l is None else right_l
+        for i, (label, n, color) in enumerate(
+                zip(HITC_LABELS, vals, colors)):
+            y = top_l + i * row_h
+            num = str(n)
+            nw = self._lrun_width(num, text_h, mono=True)
+            self._lrun(img, num, right - nw, y, text_h,
+                       (1.0, 1.0, 1.0), 0.92 * self.op, mono=True)
+            lw = self._lrun_width(label, text_h * 0.85)
+            self._lrun(img, label, right - nw - 8.0 * es - lw,
+                       y + text_h * 0.075, text_h * 0.85, color,
+                       0.92 * self.op)
 
     def draw_key_counter(self, img, t: float, held, counts=None) -> None:
         """ArgonKeyCounterDisplay (STD _argon_key_overlay, ported 1:1):

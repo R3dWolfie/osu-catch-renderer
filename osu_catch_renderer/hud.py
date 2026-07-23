@@ -299,6 +299,18 @@ class DanserHud:
             top = int(115.0 * ah.es * ah.lk)
             self._draw_mod_icons(img, t, right, top)
 
+        # HIT COUNTER — STD's house element (osu-std render/hud.py
+        # _hit_counter: live judgment rows under the whole top-right
+        # stack, drawn on BOTH of std's component paths). Below the mod
+        # icon row when it's up — std clears its pill stack the same way —
+        # else at the mod row's own slot under the acc + pp block.
+        if cfg is not None and getattr(cfg, "show_hit_counter", False):
+            top_l = 115.0 * ah.es
+            if _on("show_mods") and self.mod_imgs:
+                top_l += (max(im.height for im in self.mod_imgs) / ah.lk
+                          + 8.0 * ah.es)
+            ah.draw_hit_counter(img, scene.counts, top_l)
+
         self._draw_watermark(img)
         return np.asarray(img)
 
@@ -490,23 +502,54 @@ class DanserHud:
         # row never shifts when the badge appears mid-play — fixed anchors,
         # zero overlap (the old top ignored the pie/badge heights and let
         # tall ranking art touch the mod row).
+        k768 = H / 768.0
+        ab = getattr(self, "_acc_box", None)
+        if ab is not None and ab[3] > 0:
+            bh_max = getattr(self, "_grade_h_max", None)
+            if bh_max is None:
+                bh_max = max((g.height for g in self.grades.values()
+                              if g is not None), default=0)
+                self._grade_h_max = bh_max
+            row2_mid = ab[1] + ab[3] / 2.0
+            half = max(ab[3] / 2.0, max(8, int(33 * k768)) / 2.0,
+                       bh_max / 2.0)
+            m_top = int(row2_mid + half + 12 * k768)
+        else:
+            m_top = int(H * 0.140)
         if _on("show_mods"):
-            k768 = H / 768.0
-            ab = getattr(self, "_acc_box", None)
-            if ab is not None and ab[3] > 0:
-                bh_max = getattr(self, "_grade_h_max", None)
-                if bh_max is None:
-                    bh_max = max((g.height for g in self.grades.values()
-                                  if g is not None), default=0)
-                    self._grade_h_max = bh_max
-                row2_mid = ab[1] + ab[3] / 2.0
-                half = max(ab[3] / 2.0, max(8, int(33 * k768)) / 2.0,
-                           bh_max / 2.0)
-                m_top = int(row2_mid + half + 12 * k768)
-            else:
-                m_top = int(H * 0.140)
             self._draw_mod_icons(img, t, W - int(17 * k768), m_top,
                                  pill_gap=max(2, int(8 * k768)))
+        # HOUSE COUNTERS — pp + live hit tallies, top-right stack. std draws
+        # these settings-surface elements identically on BOTH of its component
+        # paths (osu-std render/hud.py _draw_timed: _mod_pills →
+        # _hit_counter → _pp_counter, stacked under the mod row), and mania's
+        # skinned path stacks its pp under the mod pills the same way — so
+        # catch's skinned layout stacks them below the mod icon row (whose
+        # top row-3 computed above), right-aligned with the accuracy block.
+        # House (Argon) glyphs, NOT skin digits: no sibling engine draws its
+        # counters from the skin font (std = procedural glyph bank on every
+        # path, mania = PIL house text). Values are the sim's live scene
+        # (scene.pp interpolated rosu checkpoints / scene.counts tallies).
+        if cfg is not None and (getattr(cfg, "show_pp_counter", False)
+                                or getattr(cfg, "show_hit_counter", False)):
+            from .argon_hud import ARGON_DIGIT_H, ARGON_LABEL_GAP
+            gap8 = max(2, int(8 * k768))
+            stack_y = m_top
+            if _on("show_mods") and self.mod_imgs:
+                stack_y += max(im.height for im in self.mod_imgs) + gap8
+            right_l = (W - int(17 * k768)) / ah.lk
+            if getattr(cfg, "show_pp_counter", False):
+                if scene.pp > 0:
+                    ah.draw_pp(img, scene.pp, right_l=right_l,
+                               top_l=stack_y / ah.lk)
+                # slot RESERVED even while pp is 0 (intro, or rosu missing)
+                # so the hit rows below never shift mid-play — fixed
+                # anchors, the same rule as the row-2/row-3 geometry above.
+                stack_y += int((ARGON_LABEL_GAP + ARGON_DIGIT_H * 0.6)
+                               * ah.es * ah.lk) + gap8
+            if getattr(cfg, "show_hit_counter", False):
+                ah.draw_hit_counter(img, scene.counts, stack_y / ah.lk,
+                                    right_l=right_l)
         # watermark (bottom-right)
         self._draw_watermark(img)
         return np.asarray(img)
