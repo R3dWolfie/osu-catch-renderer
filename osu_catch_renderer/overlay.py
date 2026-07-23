@@ -118,12 +118,10 @@ class CatchOverlaySim:
         s = SceneState(time_ms=t_ms)
 
         if base.has_bg:
-            in_break = any(a <= t_ms <= b for a, b in base.bm.breaks)
-            first_t = base.bm.objects[0].time_ms if base.bm.objects else 0
-            dim_pct = (base.cfg.bg_dim_breaks if in_break
-                       else base.cfg.bg_dim_intro if t_ms < first_t
-                       else base.cfg.bg_dim_game)
-            d = max(0.0, 1.0 - dim_pct / 100.0)
+            # preset bg dim via the base sim's DimEnvelope (intro/game/breaks
+            # with std's smoothstep glides — same path CatchSim.build_scene
+            # takes, so single and versus renders fade identically)
+            d = max(0.0, 1.0 - base._dim_env.level(t_ms))
             s.sprites.append(Sprite(base.screen_w / 2, base.screen_h / 2,
                                     base.screen_w, base.screen_h,
                                     texture_key="bg", color=(d, d, d, 1.0)))
@@ -183,13 +181,20 @@ class CatchOverlaySim:
                     else 1.0)
             s.sprites.extend(self._colorize_rig(rig, col, opacity, ckey, casp))
 
-        if base.cfg.letterbox_breaks and any(a <= t_ms <= b for a, b in base.bm.breaks):
-            bar = base.screen_h * 0.11
-            s.sprites.append(Sprite(base.screen_w / 2, bar / 2, base.screen_w,
-                                    bar, texture_key=None, color=(0, 0, 0, 0.92)))
-            s.sprites.append(Sprite(base.screen_w / 2, base.screen_h - bar / 2,
-                                    base.screen_w, bar, texture_key=None,
-                                    color=(0, 0, 0, 0.92)))
+        # letterbox bars fade with the break envelope, in lockstep with the
+        # bg dim glide (mirror of CatchSim.build_scene)
+        if base.cfg.letterbox_breaks:
+            lb = base._break_env.level(t_ms)
+            if lb > 0.004:
+                bar = base.screen_h * 0.11
+                a = 0.92 * lb
+                s.sprites.append(Sprite(base.screen_w / 2, bar / 2,
+                                        base.screen_w, bar,
+                                        texture_key=None, color=(0, 0, 0, a)))
+                s.sprites.append(Sprite(base.screen_w / 2,
+                                        base.screen_h - bar / 2,
+                                        base.screen_w, bar, texture_key=None,
+                                        color=(0, 0, 0, a)))
 
         if self.logo_start_ms is not None:
             base.logo_start_ms = self.logo_start_ms

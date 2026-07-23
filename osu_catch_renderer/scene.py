@@ -12,6 +12,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
 from .assets import ARGON_CANVAS, ARGON_VARIANTS
+from .dim import build_dim_envelope
 from .models import (
     CatchBeatmap,
     CatchFrame,
@@ -160,6 +161,21 @@ class CatchSim:
         self.logo_start_ms: float | None = None
         self.first_spawn_ms = (min((o.time_ms for o in self._objs), default=0)
                                - self.preempt)
+        # Background dim envelope (std's DimEnvelope, ported in dim.py): the
+        # dim GLIDES intro→game as the first approach begins, brightens into
+        # breaks and re-dims at the resume anchor — smoothstep over the same
+        # 900 ms std uses, replacing the old per-phase SNAP at the first note
+        # / break edges. Built over the FULL map (bm.objects): a death only
+        # ends the render early, it doesn't move the map's phase boundaries.
+        _starts = [o.time_ms for o in beatmap.objects]
+        self._dim_env = build_dim_envelope(
+            cfg.bg_dim_intro / 100.0, cfg.bg_dim_game / 100.0,
+            cfg.bg_dim_breaks / 100.0, _starts, self.preempt, beatmap.breaks)
+        # Letterbox weight 0..1 with the SAME glides (a 0/0/1 envelope): the
+        # break bars fade in/out in lockstep with the dim instead of snapping
+        # while the background glides (--letterbox-breaks composition).
+        self._break_env = build_dim_envelope(
+            0.0, 0.0, 1.0, _starts, self.preempt, beatmap.breaks)
 
         w, h = cfg.resolution
         self.screen_w, self.screen_h = w, h
@@ -694,17 +710,11 @@ class CatchSim:
 
     def build_scene(self, t_ms: int) -> SceneState:
         s = SceneState(time_ms=t_ms)
-        # break check, shared by the bg dim + the letterbox below (PERF hoist)
-        in_break = (any(a <= t_ms <= b for a, b in self.bm.breaks)
-                    if self.bm.breaks else False)
         # dimmed beatmap background (drawn first, behind everything)
         if self.has_bg:
-            # preset bg dim per phase: % dim (higher=darker) -> brightness mult
-            first_t = self.bm.objects[0].time_ms if self.bm.objects else 0
-            dim_pct = (self.cfg.bg_dim_breaks if in_break
-                       else self.cfg.bg_dim_intro if t_ms < first_t
-                       else self.cfg.bg_dim_game)
-            d = max(0.0, 1.0 - dim_pct / 100.0)
+            # preset bg dim via the DimEnvelope (intro/game/breaks levels with
+            # std's smoothstep glides): % dim (higher=darker) → brightness
+            d = max(0.0, 1.0 - self._dim_env.level(t_ms))
             s.sprites.append(Sprite(self.screen_w / 2, self.screen_h / 2,
                                     self.screen_w, self.screen_h,
                                     texture_key="bg", color=(d, d, d, 1.0)))
@@ -791,13 +801,21 @@ class CatchSim:
         s.sprites.extend(self._plate_stack(scx, t_ms))
         s.sprites.extend(self._catch_explosions(t_ms, scx))
 
-        # letterbox + dim during breaks (drawn last so bars sit on top)
-        if self.cfg.letterbox_breaks and in_break:
-            bar = self.screen_h * 0.11
-            s.sprites.append(Sprite(self.screen_w / 2, bar / 2, self.screen_w, bar,
-                                    texture_key=None, color=(0, 0, 0, 0.92)))
-            s.sprites.append(Sprite(self.screen_w / 2, self.screen_h - bar / 2,
-                                    self.screen_w, bar, texture_key=None, color=(0, 0, 0, 0.92)))
+        # letterbox during breaks (drawn last so bars sit on top). Bar alpha
+        # rides the 0→1 break envelope — the SAME smoothstep glides as the bg
+        # dim — so the bars fade in at the break start and out across the
+        # resume anchor instead of snapping while the background glides.
+        if self.cfg.letterbox_breaks:
+            lb = self._break_env.level(t_ms)
+            if lb > 0.004:
+                bar = self.screen_h * 0.11
+                a = 0.92 * lb
+                s.sprites.append(Sprite(self.screen_w / 2, bar / 2,
+                                        self.screen_w, bar,
+                                        texture_key=None, color=(0, 0, 0, a)))
+                s.sprites.append(Sprite(self.screen_w / 2, self.screen_h - bar / 2,
+                                        self.screen_w, bar,
+                                        texture_key=None, color=(0, 0, 0, a)))
 
         # R3D intro splash -- topmost intro element, over the idle scene
         if self.logo_start_ms is not None:
@@ -836,13 +854,29 @@ class CatchSim:
             pass
         n = len(cps)
         step = max(1, n // 80)
+        # rosu's catch passed_objects domain is FRUITS + DROPLETS only (its
+        # difficulty objects; it saturates at n_fruits+n_droplets, which is
+        # also the map's max combo). Our checkpoints index EVERY sim object —
+        # tiny droplets and bananas too — so the old `passed_objects=i + 1`
+        # overshot by their count and hit the full-map ceiling mid-play; from
+        # there rosu clamps to the FULL map and the result only moves when
+        # `misses`/`combo` change, so the counter sat bit-frozen between
+        # chain misses (the ~4:40 freeze report). Map each checkpoint to the
+        # number of combo objects actually passed instead.
+        _pc = 0
+        passed = []
+        for o in self._objs:
+            if o.kind in (ObjType.FRUIT, ObjType.DROPLET):
+                _pc += 1
+            passed.append(_pc)
         samples = {}
         for i in range(0, n, step):
             cp = cps[i]
             c3, c1, c5, tmiss, miss = cp.counts
             try:
                 samples[i] = rosu.Performance(
-                    mods=int(mods), passed_objects=i + 1, n300=c3, n100=c1,
+                    mods=int(mods), passed_objects=max(1, passed[i]),
+                    n300=c3, n100=c1,
                     n50=c5, n_katu=tmiss, misses=miss, combo=cp.max_combo,
                 ).calculate(rbm).pp
             except Exception:
