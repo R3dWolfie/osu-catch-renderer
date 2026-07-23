@@ -160,6 +160,10 @@ class RenderConfig:
     # Default ON to match the game — the bot passes nothing for catch singles.
     hitsounds: bool = True
     hitsound_volume: int = 100          # 0..100 gain on the hitsound track
+    # False = ignore the beatmap's custom samples (and per-object filename
+    # overrides); resolution then starts at the skin chain. Mirrors the
+    # site preset "Use the beatmap's hitsounds".
+    beatmap_hitsounds: bool = True
     # background (% dim 0..100; higher = darker. blur in px)
     bg_dim_intro: int = 0
     bg_dim_game: int = 70

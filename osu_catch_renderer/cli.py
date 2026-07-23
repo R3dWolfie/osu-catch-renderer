@@ -60,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--general-volume", type=int, default=100)
     ap.add_argument("--audio-offset", type=int, default=0, help="ms; -earlier")
+    ap.add_argument("--beatmap-hitsounds", action=BA, default=True,
+                    help="use the beatmap's custom hitsound samples; OFF = "
+                         "resolve from the skin chain only (the site's "
+                         "'Use the beatmap's hitsounds' toggle)")
     ap.add_argument("--hitsounds", default="on", metavar="MODE",
                     help="caught-object hitsounds under the music (stable "
                          "behaviour). 'off'/'none' disable; any other value "
@@ -143,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         hitsounds=str(args.hitsounds).strip().lower()
         not in ("off", "none", "0", "false", "no"),
         hitsound_volume=max(0, min(100, args.hitsound_volume)),
+        beatmap_hitsounds=args.beatmap_hitsounds,
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=args.bg_dim_game,
         bg_dim_breaks=args.bg_dim_breaks,

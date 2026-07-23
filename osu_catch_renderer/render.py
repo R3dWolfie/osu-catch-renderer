@@ -335,6 +335,11 @@ def render_core(
             has_custom = (skin is not None
                           and getattr(skin, "_user_skin_dir", None) is not None)
             bdir = osu_path.parent if osu_path is not None else audio.parent
+            # "Use the beatmap's hitsounds" OFF: hand the bank no beatmap
+            # dir at all — custom samples + filename overrides vanish and
+            # every event resolves via skin chain -> synth.
+            if not getattr(cfg, "beatmap_hitsounds", True):
+                bdir = None
             hits_wav = build_hitsound_track(
                 objs, caught_flags, bm,
                 beatmap_dir=bdir, skin_dirs=skin_dirs,
