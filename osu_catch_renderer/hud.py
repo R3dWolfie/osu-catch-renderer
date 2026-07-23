@@ -1241,9 +1241,9 @@ class DanserHud:
             if self.key_img is not None:
                 # Draw at NATIVE LOGICAL size * (H/768), centred on the cell —
                 # what stable/lazer do (see the key_img load comment). CACHED
-                # by (w, h, tinted): the 160 ms tween quantises to a couple
-                # dozen pixel sizes per tint at most. Oversized art is clamped
-                # so a rogue sprite can never cover the playfield.
+                # by (w, h, ActiveColour): the 160 ms tween quantises to a
+                # couple dozen pixel sizes per tint at most. Oversized art is
+                # clamped so a rogue sprite can never cover the playfield.
                 kw = self.key_img.width * kk
                 kh = self.key_img.height * kk
                 cap = ks * 2.0
@@ -1251,7 +1251,16 @@ class DanserHud:
                     f = cap / max(kw, kh)
                     kw, kh = kw * f, kh * f
                 tinted = bool(held[i])   # keySprite.Colour: instant in lazer
-                ck = (max(1, int(kw * s)), max(1, int(kh * s)), tinted)
+                # The cache key MUST carry the ActiveColour, not just a bool:
+                # the movement keys (i<2) tint #ffde00 and the dash key (i>=2)
+                # #f8009e, but at the SAME cell size. Keying on `tinted` alone
+                # let the first tinted key drawn at a given size (always a
+                # yellow movement key, and the cache persists across frames)
+                # satisfy the dash key's lookup too — so the dash key rendered
+                # yellow instead of magenta (the reported bug). Include `act`
+                # so each flow colour gets its own entry.
+                ck = (max(1, int(kw * s)), max(1, int(kh * s)),
+                      act if tinted else None)
                 cache = getattr(self, "_kc_key_cache", None)
                 if cache is None:
                     cache = self._kc_key_cache = {}
