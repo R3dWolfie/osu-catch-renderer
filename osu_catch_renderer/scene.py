@@ -421,19 +421,22 @@ class CatchSim:
                             _pile_ci = obj.combo_index
                             _pile_placed = []
                         cxh, _ = catcher_x_at(self.frames, obj.time_ms)
-                        # Cluster toward the catcher centre (0.55) instead of the
-                        # full caught-offset, so the pile stacks UP rather than
-                        # smearing across the whole bar width (Red: "stack on top
-                        # of each other", not a diagonal chain).
-                        px = (obj.x - cxh) * 0.55
+                        # lazer Catcher.computePositionInStack (ported exactly):
+                        # land at the FULL offset where it was caught
+                        # (palpableObject.X - catcher.X), then de-overlap-jitter
+                        # below only when it collides with fruit already piled.
+                        px = (obj.x - cxh)
                         py = 0.0
                         chk = _pile_adj * _pile_adj
                         rng = _random.Random(int(obj.time_ms))
                         _g = 0
                         while _g < 64 and any((px - fx) ** 2 + (py - fy) ** 2 < chk
                                               for fx, fy in _pile_placed):
-                            px += rng.uniform(-_pile_adj * 0.45, _pile_adj * 0.45)
-                            py -= rng.uniform(3.0, 7.0)     # build the tower UPWARD
+                            # lazer: X += RNG(-adjustedRadius, adjustedRadius);
+                            # Y -= RNG(0, 5).  (_pile_adj == lazer adjustedRadius:
+                            # DisplaySize.X * 10/64 == 128*scale * 10/64.)
+                            px += rng.uniform(-_pile_adj, _pile_adj)
+                            py -= rng.uniform(0.0, 5.0)
                             _g += 1
                         _pile_placed.append((px, py))
                         self._plate.append([obj.time_ms, px, py, obj.combo_index,
@@ -485,7 +488,7 @@ class CatchSim:
                 # bit-identical (flagged as a known gap for the next argon
                 # certification pass).
                 cxb, _ = catcher_x_at(self.frames, obj.time_ms)
-                self._plate.append([obj.time_ms, (obj.x - cxb) * 0.55, 0.0,
+                self._plate.append([obj.time_ms, (obj.x - cxb), 0.0,
                                     obj.combo_index, obj.hyperdash,
                                     obj.time_ms, "banana"])
             # lazer CatchScoreProcessor.ComputeTotalScore:
