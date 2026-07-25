@@ -438,6 +438,12 @@ class CatchSim:
                             px += rng.uniform(-_pile_adj, _pile_adj)
                             py -= rng.uniform(0.0, 5.0)
                             _g += 1
+                        # Keep the pile within the catch range (== the
+                        # catcher body extent). The de-overlap jitter above
+                        # can push a fruit past where it was ever catchable,
+                        # which renders it OFF the plate (Red 2026-07-25). lazer
+                        # keeps caught fruit on the catcher; clamp X to +/-half.
+                        px = max(-self.half, min(self.half, px))
                         _pile_placed.append((px, py))
                         self._plate.append([obj.time_ms, px, py, obj.combo_index,
                                             obj.hyperdash, None, None])
@@ -800,8 +806,14 @@ class CatchSim:
         # hyperdash after-image window) instead of strobing with the live flag.
         if self.cfg.catcher_dash_trail:
             s.sprites.extend(self._dash_trail(t_ms, hyper_amt))
-        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper_amt, t_ms))
+        # Caught fruit render BEHIND the catcher body -- lazer Catcher.cs adds
+        # caughtObjectContainer BEFORE `body = SkinnableCatcher()`, so the body
+        # draws on top (Red 2026-07-25: "fruits appear before the plate instead
+        # of behind"). This reverses the 2026-07-20 in-front tweak, which was
+        # not lazer-accurate. Hit explosions stay in front (lazer puts
+        # hitExplosionContainer after body).
         s.sprites.extend(self._plate_stack(scx, t_ms))
+        s.sprites.extend(self._catcher_sprites(scx, dashing or hyper, hyper_amt, t_ms))
         s.sprites.extend(self._catch_explosions(t_ms, scx))
 
         # letterbox during breaks (drawn last so bars sit on top). Bar alpha
