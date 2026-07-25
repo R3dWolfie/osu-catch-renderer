@@ -26,3 +26,15 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Third-party skins + test fixtures: bundled on disk for rendering, never published
+night05-skin/
+tester-skin/
+tester.osk
+test/1220325/
+*.osk
+*.osz
+*.osu
+*.osr
+*.mp3
+__pycache__/
