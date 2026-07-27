@@ -955,6 +955,13 @@ class DanserHud:
             dx = int(ax - 18 * (self.h / 768.0) - box)
             dy = int(ay + ah / 2 - box / 2)
         x, y = self._place("LegacySongProgress", box, box, (dx, dy))
+        # Keep the pie on-screen even when the accuracy box that anchors it is
+        # unset/degenerate — the Argon HUD path draws the accuracy but never sets
+        # _pie_xy, so the ah=0 acc_box fallback put dy negative and the pie
+        # clipped off the top-right (2026-07-27 report). No-op for legacy skins
+        # (valid _pie_xy) — position is already in bounds.
+        x = max(2, min(int(x), img.width - box - 2))
+        y = max(2, min(int(y), img.height - box - 2))
         d = ImageDraw.Draw(img)
         intro = t_ms < self.first_ms
         col = (199, 255, 47) if intro else (255, 255, 255)
