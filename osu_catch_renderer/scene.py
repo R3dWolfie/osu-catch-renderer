@@ -305,10 +305,10 @@ class CatchSim:
         if m is not None:
             def _reconcile(kind, target_caught):
                 if target_caught is None:
-                    return
+                    return 0
                 idxs = [i for i, o in enumerate(objs) if o.kind is kind]
                 if not idxs:
-                    return
+                    return 0
                 diff = target_caught - sum(self._caught[i] for i in idxs)
                 if diff > 0:   # need more caught: flip closest missed (smallest +margin)
                     for i in sorted((i for i in idxs if not self._caught[i]),
@@ -318,9 +318,25 @@ class CatchSim:
                     for i in sorted((i for i in idxs if self._caught[i]),
                                     key=lambda i: margin[i])[diff:]:
                         self._caught[i] = False
-            _reconcile(ObjType.FRUIT, m.count_300)
-            _reconcile(ObjType.DROPLET, m.count_100)
-            _reconcile(ObjType.TINY_DROPLET, m.count_50)
+                return abs(diff)
+            _flips = (_reconcile(ObjType.FRUIT, m.count_300)
+                      + _reconcile(ObjType.DROPLET, m.count_100)
+                      + _reconcile(ObjType.TINY_DROPLET, m.count_50))
+            # Guard: reconcile is meant for a HANDFUL of RNG-boundary objects
+            # (tiny-droplet offsets we can't reproduce bit-exact). If geometry
+            # disagrees with the .osr on a large fraction of objects, the replay
+            # does NOT match the score — a truncated/desynced/corrupt .osr from
+            # the API (e.g. a near-empty replay whose static catcher geometrically
+            # catches ~nothing). Forcing the counts would fabricate the render
+            # (a motionless catcher "catching" the whole map). Fail loudly so the
+            # pipeline opens a bug report instead of shipping a fake video.
+            _n = len(objs)
+            if _n and _flips >= 50 and _flips > 0.20 * _n:
+                raise RuntimeError(
+                    "catch replay desynced from score: geometry and the .osr "
+                    f"disagree on {_flips}/{_n} objects ({_flips / _n:.0%}) — "
+                    "truncated or corrupt replay; refusing to render a "
+                    "fabricated result")
             # --- combo-aware reconcile (honesty pass, std-renderer pattern):
             # counts now match the header, but the END-OF-MAP combo the HUD
             # shows is the run AFTER THE LAST MISS — with a wrongly-PLACED
