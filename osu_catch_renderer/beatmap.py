@@ -338,6 +338,17 @@ def _clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
 
 
+# Degenerate-map guard: cap nested-object generation so a converted std
+# "2B"/aspire map with billion-pixel sliders can't generate billions of droplet
+# objects and OOM the render during setup (2026-07: one such map — beatmap
+# 4679228, max slider 554e9 px — ballooned a render subprocess to ~63G before a
+# single frame drew). Real sliders never approach these caps, so every
+# legitimate map stays byte-identical; only a degenerate slider is bounded.
+_MAX_TICKS_PER_SPAN = 10_000
+_MAX_TINY_PER_GAP = 10_000
+_MAX_SPANS = 10_000
+
+
 def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, tick_rate, hr, lazer=False, rng=None):
     """Faithful osu!catch juice-stream nesting (lazer JuiceStream):
     Head/Repeat/Tail -> Fruit, Tick -> large Droplet, gaps filled with
@@ -385,6 +396,7 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     y0 = _f(f[1], 0.0)   # head Y — needed for correct P/B slider-curve geometry
     curve = f[5]
     spans = int(f[6]) if f[6].isdigit() else 1
+    spans = min(spans, _MAX_SPANS)   # degenerate-map guard
     pixel_length = _f(f[7], 0.0)
     length = pixel_length
     # Lazer replays: use the bit-exact lazer SliderPath (pixel-length truncated).
@@ -412,11 +424,13 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
             rev = (s % 2) == 1
             ticks: list[tuple[float, float, str, int]] = []
             d = tick_distance
-            while d <= length - min_from_end:
+            _nt = 0
+            while d <= length - min_from_end and _nt < _MAX_TICKS_PER_SPAN:
                 pp = d / length
                 tp = (1.0 - pp) if rev else pp
                 ticks.append((span_start + tp * span_dur, pp, "tick", -1))
                 d += tick_distance
+                _nt += 1
             ticks.sort(key=lambda e: e[0])
             events.extend(ticks)
             if s < spans - 1:
@@ -447,13 +461,15 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
             while tb > 100:
                 tb /= 2.0
             t = tb
-            while t < since:
+            _ntd = 0
+            while t < since and _ntd < _MAX_TINY_PER_GAP:
                 pp = prev[1] + (t / since) * (cur[1] - prev[1])
                 ox = path.x_at(pp)
                 if rng is not None:
                     ox += _clamp(rng.next_range(-20, 20), -ox, 512.0 - ox)
                 out.append(CatchObject(int(prev[0] + t), ox, ObjType.TINY_DROPLET, combo_index, False))
                 t += tb
+                _ntd += 1
         if cur[2] == "tick":
             if rng is not None:
                 rng.next()   # osu!stable retrieved a random droplet rotation
