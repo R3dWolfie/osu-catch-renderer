@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# osu mod bit -> selection-mod-<name>. Nightcore (512) supersedes DT icon.
+# osu mod bit -> selection-mod-<name>. Nightcore (512) supersedes DT; Perfect (16384) supersedes SD.
 _MODS = [
     (2, "easy"), (8, "hidden"), (16, "hardrock"), (512, "nightcore"),
     (64, "doubletime"), (256, "halftime"), (1024, "flashlight"),
@@ -1726,6 +1726,8 @@ class DanserHud:
             if mods & bit and name not in seen:
                 if name == "doubletime" and (mods & 512):
                     continue  # nightcore icon already covers it
+                if name == "suddendeath" and (mods & 16384):
+                    continue  # perfect icon already covers it (PF = SD|Perfect)
                 im = self._load(f"selection-mod-{name}", target_h)
                 if im is not None:
                     out.append(im)
