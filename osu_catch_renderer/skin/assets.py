@@ -310,7 +310,7 @@ def bake_logo_tile(size: int = 256) -> np.ndarray:
     """RGBA tile for the intro splash. Prefers assets/logo.png (the real R3D
     logo); procedural fallback (rounded red tile + white R) only if missing."""
     try:
-        lp = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+        lp = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "logo.png")
         im = Image.open(lp).convert("RGBA").resize((size, size), Image.LANCZOS)
         return np.asarray(im, dtype=np.uint8).copy()
     except Exception:
@@ -320,7 +320,7 @@ def bake_logo_tile(size: int = 256) -> np.ndarray:
     drw.rounded_rectangle([0, 0, size - 1, size - 1],
                           radius=int(size * 0.18), fill=LOGO_TILE_RED + (255,))
     try:
-        from .fonts import font as _font
+        from osu_catch_renderer.hud.fonts import font as _font
         f = _font(int(size * 0.66))
         box = f.getbbox("R")
         rw, rh = box[2] - box[0], box[3] - box[1]

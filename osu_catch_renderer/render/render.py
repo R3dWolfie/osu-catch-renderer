@@ -19,13 +19,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .assets import build_textures
-from .beatmap import parse_beatmap
-from .flashlight import CatchFlashlight, has_flashlight
-from .gl import SpriteRenderer
-from .models import RenderConfig, ar_to_preempt_ms
-from .replay import parse_replay
-from .scene import CatchSim, mods_score_multiplier
+from osu_catch_renderer.skin.assets import build_textures
+from osu_catch_renderer.beatmap.beatmap import parse_beatmap
+from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
+from osu_catch_renderer.render.gl import SpriteRenderer
+from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms
+from osu_catch_renderer.beatmap.replay import parse_replay
+from osu_catch_renderer.render.scene import CatchSim, mods_score_multiplier
 
 
 class CatchRenderError(RuntimeError):
@@ -163,14 +163,14 @@ def render_core(
     gives each player their OWN skin's catcher; falsy/'-' → base skin catcher.
     The base playfield/fruits/HUD come from the base skin (`cfg.skin_dir`).
     Single renders leave overlay_extra None."""
-    from .fonts import set_skin_font
+    from osu_catch_renderer.hud.fonts import set_skin_font
     # prefer a font bundled in the skin, else a robust system font (must run
     # before the HUD builds its glyph/text fonts below).
     set_skin_font(cfg.skin_dir)
 
     skin = None
     if cfg.skin_dir is not None:
-        from .skin import CatchSkin
+        from osu_catch_renderer.skin.skin import CatchSkin
         skin = CatchSkin(cfg.skin_dir, cfg.default_skin_dir)
     # Failed play: end the render at death instead of playing the unreached
     # remainder with a frozen catcher (which reads as phantom misses). Only
@@ -188,8 +188,8 @@ def render_core(
     _overlay_gray_keys = set()
     _player_catcher_bakes = []      # [(texture_key, rgba)] grayscaled + uploaded below
     if overlay_extra:
-        from .overlay import CatchOverlaySim
-        from .skin import CatchSkin
+        from osu_catch_renderer.render.overlay import CatchOverlaySim
+        from osu_catch_renderer.skin.skin import CatchSkin
         extra_sims = [CatchSim(bm, fr, cfg, skin=skin, has_bg=bg is not None,
                                meta=mt, end_ms=None)
                       for (fr, mt, _n) in overlay_extra]
@@ -264,7 +264,7 @@ def render_core(
     score_fid: dict | None = None
     if osu_path is not None:
         try:
-            from .score_fidelity import (compute_candidates,
+            from osu_catch_renderer.beatmap.score_fidelity import (compute_candidates,
                                          resolve_authoritative)
 
             def _pin(one_sim, one_meta):
@@ -363,11 +363,11 @@ def render_core(
     # osu!lazer ARGON catch objects (glowing wavy combo rings + white pip) and
     # the Argon catcher bar — uploaded regardless of skin: the skinless object
     # path, the caught-fruit plate pile, and the hit explosions all use them.
-    from .assets import (build_argon_textures, catch_glow_rgba, catch_beam_rgba,
+    from osu_catch_renderer.skin.assets import (build_argon_textures, catch_glow_rgba, catch_beam_rgba,
                          bake_logo_tile)
     for key, rgba in build_argon_textures().items():
         renderer.upload_texture(key, rgba)
-    from .lazer_skin import argon_bar_cap_rgba
+    from osu_catch_renderer.skin.lazer_skin import argon_bar_cap_rgba
     renderer.upload_texture("argon_bar_cap", argon_bar_cap_rgba())
     renderer.upload_texture("catch_glow", catch_glow_rgba())
     renderer.upload_texture("catch_beam", catch_beam_rgba())
@@ -384,7 +384,7 @@ def render_core(
     hits_wav = None
     if audio is not None and getattr(cfg, "hitsounds", True):
         try:
-            from .hitsounds import build_hitsound_track, synth_style_for
+            from osu_catch_renderer.beatmap.hitsounds import build_hitsound_track, synth_style_for
             objs, caught_flags = base_sim.catch_events()
             skin_dirs = skin.dirs if skin is not None else []
             has_custom = (skin is not None
@@ -411,20 +411,20 @@ def render_core(
     # the STD renderer). DanserHud now handles skin_dir=None; plain _Hud only if
     # DanserHud fails to build.
     try:
-        from .hud import DanserHud
+        from osu_catch_renderer.hud.hud import DanserHud
         hud = DanserHud(cfg.skin_dir, cfg.resolution, meta, bm, first, last, cfg=cfg,
                         default_skin_dir=cfg.default_skin_dir)
     except Exception:
         hud = _Hud(w, h, meta, bm)
 
-    from .hud import draw_results
+    from osu_catch_renderer.hud.hud import draw_results
     # results-screen map leaderboard (parity with std): build + bake ONCE, up
     # front, so the outro just composites the pre-baked cards each frame. Fully
     # fail-soft — any problem leaves the plain results card (renders unchanged).
     baked_board = None
     if cfg.show_results and getattr(cfg, "show_leaderboard", True):
         try:
-            from .lb_cards import build_catch_board
+            from osu_catch_renderer.hud.lb_cards import build_catch_board
             baked_board = build_catch_board(cfg, meta, bm, replay_md5)
         except Exception as e:  # noqa: BLE001 — a board must never break a render
             import sys
@@ -806,4 +806,4 @@ class _Hud:
         return np.asarray(img)
 
 
-from .fonts import font as _font  # skin-aware, host-robust font resolver
+from osu_catch_renderer.hud.fonts import font as _font  # skin-aware, host-robust font resolver

@@ -33,7 +33,7 @@ import os
 import numpy as np
 from PIL import Image, ImageFont
 
-from .argon_counter import (argon_digit_advance, argon_glyph_rgba,
+from osu_catch_renderer.argon.argon_counter import (argon_digit_advance, argon_glyph_rgba,
                             argon_wireframe_dot_rgba, argon_wireframe_rgba)
 
 # --- constants (STD render/hud.py — values straight from ppy/osu Argon*) -----
@@ -101,7 +101,7 @@ ARGON_GLYPH_CAP_FILL = 0.7025
 ARGON_GLYPH_CAP_SCALE = DEJAVU_GLYPH_CAP_FILL / ARGON_GLYPH_CAP_FILL
 ARGON_FONT_WEIGHT = 500        # Nunito Medium (variable-font `wght` axis)
 NUNITO_PATH = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), "assets", "fonts", "Nunito[wght].ttf"))
+    os.path.dirname(os.path.dirname(__file__)), "assets", "fonts", "Nunito[wght].ttf"))
 LABEL_BAKE_H = 128             # native bake height (STD DIGIT_HEIGHT)
 # STD bakes its label bank over this exact charset; the union vertical
 # extent is shared per bank, so the charset must match for identical aspects.
@@ -252,7 +252,7 @@ def _load_label_font(px: int):
     try:
         f = ImageFont.truetype(NUNITO_PATH, max(int(px), 6))
     except OSError:
-        from .fonts import font as _catch_font
+        from osu_catch_renderer.hud.fonts import font as _catch_font
         return _catch_font(max(int(px), 6))
     try:
         f.set_variation_by_axes([ARGON_FONT_WEIGHT])

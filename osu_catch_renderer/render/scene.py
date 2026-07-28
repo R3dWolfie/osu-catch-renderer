@@ -11,9 +11,9 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
-from .assets import ARGON_CANVAS, ARGON_VARIANTS
-from .dim import build_dim_envelope
-from .models import (
+from osu_catch_renderer.skin.assets import ARGON_CANVAS, ARGON_VARIANTS
+from osu_catch_renderer.render.dim import build_dim_envelope
+from osu_catch_renderer.beatmap.models import (
     CatchBeatmap,
     CatchFrame,
     ObjType,
@@ -23,7 +23,7 @@ from .models import (
     ar_to_preempt_ms,
     cs_to_catcher_half_width,
 )
-from .replay import catcher_x_at
+from osu_catch_renderer.beatmap.replay import catcher_x_at
 
 PLAYFIELD = 512.0
 FRUIT_TEX = {0: "fruit0", 1: "fruit1", 2: "fruit2", 3: "fruit3"}
@@ -1289,7 +1289,7 @@ class CatchSim:
                            self.catcher_w * scale * facing, hb * scale,
                            texture_key=ck,
                            color=(*rgb, alpha), additive=True)]
-        from .lazer_skin import argon_catcher_metrics
+        from osu_catch_renderer.skin.lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
         cy = g["cy"] + dy
         # facing flips the whole body in lazer; the Argon catcher is built
@@ -1395,7 +1395,7 @@ class CatchSim:
         # width) + a bumper at each end of the catch range + faint side lines
         # out to the screen edges. Footprint/placement unchanged (full width =
         # catcher_w, bar top on plane_y). Hyperdash turns it red + glowing.
-        from .lazer_skin import argon_catcher_metrics
+        from osu_catch_renderer.skin.lazer_skin import argon_catcher_metrics
         g = argon_catcher_metrics(self.catcher_w, self.unit_px, self.plane_y)
         cy = g["cy"]
         # lazer's ArgonCatcher is white; hyperdash turns it full red (no glow —
@@ -1660,7 +1660,7 @@ class CatchSim:
         """The R3D 'R' tile intro splash (show_logo), fading out exactly as the
         first fruit begins its approach -- ported from the std renderer's
         _draw_logo so the splash is identical across modes."""
-        from .effects import logo_alpha, logo_scale, LOGO_UI_SIZE
+        from osu_catch_renderer.render.effects import logo_alpha, logo_scale, LOGO_UI_SIZE
         la = logo_alpha(t_ms, self.logo_start_ms, self.first_spawn_ms)
         if la is None:
             return []

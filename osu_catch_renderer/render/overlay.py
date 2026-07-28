@@ -20,8 +20,8 @@ from __future__ import annotations
 import colorsys
 from bisect import bisect_left, bisect_right
 
-from .models import SceneState, Sprite
-from .replay import catcher_x_at
+from osu_catch_renderer.beatmap.models import SceneState, Sprite
+from osu_catch_renderer.beatmap.replay import catcher_x_at
 
 # element textures that get grayscale+tint per player (catcher + its trail).
 # Everything else (fruits, plate, explosions) stays full skin.

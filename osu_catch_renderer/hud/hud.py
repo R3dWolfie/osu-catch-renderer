@@ -47,7 +47,7 @@ class DanserHud:
         # finds score/combo/ranking/mod sprites for ANY skin whose assets live
         # in a subdir (the bundled default's `_default-source`, single-folder
         # .osk archives, etc.) — not just skins with skin.ini at the top level.
-        from .skin import CatchSkin
+        from osu_catch_renderer.skin.skin import CatchSkin
         self.dir = CatchSkin._resolve_root(Path(skin_dir)) if skin_dir else None
         # DEFAULT-SKIN FALLBACK (osu behaviour: an element the skin doesn't ship
         # comes from the default skin). CatchSkin already did this for the
@@ -166,8 +166,8 @@ class DanserHud:
         # Argon health bar at STD's exact placement (ArgonSkin: HP_POS
         # (50,20) lazer px, fixed Width=300 — the fractions below make the
         # internal k == lk, so every lazer constant lands 1:1 like STD's).
-        from .argon_health import ArgonHealth
-        from .argon_hud import (HP_POS, HP_WIDTH, LAZER_UI_HEIGHT, ArgonHud,
+        from osu_catch_renderer.argon.argon_health import ArgonHealth
+        from osu_catch_renderer.argon.argon_hud import (HP_POS, HP_WIDTH, LAZER_UI_HEIGHT, ArgonHud,
                                 density_buckets)
         lk = self.h / LAZER_UI_HEIGHT
         self.argon_hp = ArgonHealth(self.w, self.h,
@@ -199,7 +199,7 @@ class DanserHud:
         self.key_img = self._load_native("inputoverlay-key", default_ok=False)
         # The skin's OWN lazer HUD arrangement (MainHUDComponents.json), when it
         # ships one. Empty dict -> default legacy placement below.
-        from .lazer_hud import load_layout
+        from osu_catch_renderer.hud.lazer_hud import load_layout
         self.layout = load_layout(self.dir)
         self._kc_counts = [0, 0, 0]
         self._roll = {}     # rolling-counter state: key -> (from, to, start_t)
@@ -223,7 +223,7 @@ class DanserHud:
         # stable has no equivalent panel and the owner wants the lazer look
         # on skinned renders too, so it's deliberately lazer-styled always
         # (independent of --letterbox-breaks, which lazer doesn't gate on).
-        from .break_overlay import LazerBreakOverlay
+        from osu_catch_renderer.render.break_overlay import LazerBreakOverlay
         self.break_overlay = LazerBreakOverlay(
             self.w, self.h, getattr(beatmap, "breaks", None) or [],
             mods=int(getattr(meta, "mods", 0) or 0))
@@ -304,7 +304,7 @@ class DanserHud:
         if _on("show_mods"):
             # below the argon accuracy + pp block (pp bottom ≈ 102 lazer
             # units; see argon_hud.draw_pp) — right-aligned with them.
-            from .argon_hud import ARGON_ACC_POS
+            from osu_catch_renderer.argon.argon_hud import ARGON_ACC_POS
             right = int((ah.ui_w_l + ARGON_ACC_POS[0] * ah.es) * ah.lk)
             top = int(115.0 * ah.es * ah.lk)
             self._draw_mod_icons(img, t, right, top)
@@ -547,7 +547,7 @@ class DanserHud:
         # (scene.pp interpolated rosu checkpoints / scene.counts tallies).
         if cfg is not None and (getattr(cfg, "show_pp_counter", False)
                                 or getattr(cfg, "show_hit_counter", False)):
-            from .argon_hud import ARGON_DIGIT_H, ARGON_LABEL_GAP
+            from osu_catch_renderer.argon.argon_hud import ARGON_DIGIT_H, ARGON_LABEL_GAP
             gap8 = max(2, int(8 * k768))
             stack_y = m_top
             if _on("show_mods") and self.mod_imgs:
@@ -1817,7 +1817,7 @@ def draw_results(rgb, meta, bm, opacity: float, board=None, age_ms=None,
         key = id(meta)
         scr = _LAZER_RESULTS.get(key)
         if scr is None:
-            from .lazer_results import CatchLazerResults
+            from osu_catch_renderer.hud.lazer_results import CatchLazerResults
             _LAZER_RESULTS.clear()          # one render at a time
             scr = CatchLazerResults((rgb.shape[1], rgb.shape[0]), meta, bm,
                                     board=board, osu_path=osu_path, sim=sim)
@@ -1886,7 +1886,7 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
     # judgment row + full player·title caption (existing renders unchanged).
     compact = board is not None and getattr(board, "compact", False)
     if compact:
-        from .lb_cards import CENTER_CLEAR_FRAC
+        from osu_catch_renderer.hud.lb_cards import CENTER_CLEAR_FRAC
         col_w = int(W * CENTER_CLEAR_FRAC * 0.98)
     else:
         col_w = int(W * 0.92)
@@ -1943,11 +1943,11 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
     # frame just falls back to the plain results card.
     if board is not None:
         try:
-            from .lb_cards import draw_board
+            from osu_catch_renderer.hud.lb_cards import draw_board
             draw_board(out, board, opacity)
         except Exception:  # noqa: BLE001 — a board never breaks a render
             pass
     return np.asarray(out.convert("RGB"))
 
 
-from .fonts import font as _font  # skin-aware, host-robust font resolver
+from osu_catch_renderer.hud.fonts import font as _font  # skin-aware, host-robust font resolver

@@ -14,9 +14,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from .legacy_random import RNG_SEED, LegacyRandom
-from .models import CatchBeatmap, CatchObject, HitSample, ObjType
-from .sliderpath import SliderPath
+from osu_catch_renderer.beatmap.legacy_random import RNG_SEED, LegacyRandom
+from osu_catch_renderer.beatmap.models import CatchBeatmap, CatchObject, HitSample, ObjType
+from osu_catch_renderer.render.sliderpath import SliderPath
 
 # HitObject type bitfield
 _TYPE_CIRCLE = 1 << 0

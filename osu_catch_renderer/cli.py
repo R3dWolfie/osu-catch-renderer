@@ -9,8 +9,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from .models import RenderConfig
-from .render import render_catch
+from osu_catch_renderer.beatmap.models import RenderConfig
+from osu_catch_renderer.render.render import render_catch
 
 
 def _resolution(s: str) -> tuple[int, int]:
@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     # render-DB Discord lookup (which could show the SITE OWNER's pfp).
     if args.featured_avatar_png is not None:
         try:
-            from . import lazer_results as _lr
+            from osu_catch_renderer.hud import lazer_results as _lr
             _lr.set_featured_avatar_png(args.featured_avatar_png)
         except Exception:  # noqa: BLE001 -- avatar wiring never breaks a render
             pass

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from osrparse import Replay
 
-from .models import CatchFrame, ReplayMeta
+from osu_catch_renderer.beatmap.models import CatchFrame, ReplayMeta
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345

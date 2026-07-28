@@ -188,7 +188,7 @@ def bake_wireframe_dot(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
 # fallback keeps its 132x240 (0.55) aspect, so a stripped checkout is unchanged.
 # ---------------------------------------------------------------------------
 
-_ASSET_DIR = os.path.join(os.path.dirname(__file__), "argon_assets")
+_ASSET_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "argon_assets")
 
 # glyph char -> the argon-counter-<stem>.png stem
 _SPRITE_STEM = {**{str(d): str(d) for d in range(10)},

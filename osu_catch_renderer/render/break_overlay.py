@@ -66,8 +66,8 @@ from bisect import bisect_right
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from .argon_counter import argon_digit_advance, argon_glyph_rgba
-from .argon_hud import ARGON_GLYPH_CAP_SCALE, LAZER_UI_HEIGHT, NUNITO_PATH
+from osu_catch_renderer.argon.argon_counter import argon_digit_advance, argon_glyph_rgba
+from osu_catch_renderer.argon.argon_hud import ARGON_GLYPH_CAP_SCALE, LAZER_UI_HEIGHT, NUNITO_PATH
 
 # --- lazer constants (files cited in the module docstring) -------------------
 MIN_BREAK_DURATION = 650.0        # BreakPeriod.MIN_BREAK_DURATION (HasEffect)
@@ -117,7 +117,7 @@ def grade_display(accuracy: float, mods: int) -> str:
     """The break overlay's Grade line text: the engine's own catch grade
     (hud._catch_grade — single source for cutoffs) mapped to lazer's rank
     display strings, with the HD/FL silver adjustment lazer applies."""
-    from .hud import _catch_grade   # lazy: hud imports this module
+    from osu_catch_renderer.hud.hud import _catch_grade   # lazy: hud imports this module
     g = _catch_grade(max(0.0, min(1.0, accuracy)) * 100.0, 0)
     if mods & (_HD | _FL):
         if g == "SS":
@@ -253,7 +253,7 @@ class LazerBreakOverlay:
                 except Exception:  # noqa: BLE001 — non-variable build
                     pass
             except OSError:
-                from .fonts import font as _fallback
+                from osu_catch_renderer.hud.fonts import font as _fallback
                 f = _fallback(px)
             self._font_cache[key] = f
         return f
@@ -315,7 +315,7 @@ class LazerBreakOverlay:
 
     def _bar_pill(self, w_px: int, h_px: int, alpha: float) -> Image.Image:
         """remainingTimeBox: a white fully-rounded Circle, h = min(8, w)."""
-        from .argon_hud import bake_pill_alpha
+        from osu_catch_renderer.argon.argon_hud import bake_pill_alpha
         a = bake_pill_alpha(w_px, h_px) * (alpha * 255.0)
         rgba = np.zeros((h_px, w_px, 4), np.uint8)
         rgba[..., :3] = 255

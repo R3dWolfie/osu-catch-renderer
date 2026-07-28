@@ -80,8 +80,8 @@ from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from .fonts import font as _catch_font
-from .lb_cards import (DB_PATH, RESULT_COLORS as CATCH_RESULT_COLORS,
+from osu_catch_renderer.hud.fonts import font as _catch_font
+from osu_catch_renderer.hud.lb_cards import (DB_PATH, RESULT_COLORS as CATCH_RESULT_COLORS,
                        bake_round_panel)
 
 UH = 1080.0                    # virtual design height (std convention)
@@ -197,7 +197,7 @@ STAR_SPECTRUM = [
 
 # the bundled Nunito (copied from the std renderer's assets — SIL OFL)
 NUNITO_PATH = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), "assets", "fonts", "Nunito[wght].ttf"))
+    os.path.dirname(os.path.dirname(__file__)), "assets", "fonts", "Nunito[wght].ttf"))
 
 
 def _nunito_loader(weight: int):

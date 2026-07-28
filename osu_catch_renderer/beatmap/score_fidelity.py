@@ -63,7 +63,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from struct import pack, unpack
 
-from .models import ObjType
+from osu_catch_renderer.beatmap.models import ObjType
 
 MAX_SCORE = 1_000_000.0
 
