@@ -935,7 +935,7 @@ class CatchLazerResults:
     frame on catch's CPU compositor, then caches the settled frame."""
 
     def __init__(self, resolution, meta, bm, board=None, osu_path=None,
-                 sim=None, pp_override=None):
+                 sim=None, pp_override=None, sr_override=None):
         self.W, self.H = int(resolution[0]), int(resolution[1])
         self.k = self.H / UH
         self.meta = meta
@@ -972,6 +972,13 @@ class CatchLazerResults:
         # rosu pp. Mirrors the taiko _final_pp override.
         if pp_override is not None:
             self.pp = float(pp_override)
+        # --sr: pin the results-card star-rating pill to the EXACT official SR
+        # passed by the service (RenderConfig.sr_override), overriding the rosu
+        # estimate. self.stars feeds bake_star_pill (the pill number + colour).
+        # max_pp/pp stay as computed. None -> unchanged rosu SR. Mirrors the
+        # pp_override above.
+        if sr_override is not None:
+            self.stars = float(sr_override)
 
         # --- stage-2 source data (real catch data; never faked) -------------
         # combo-over-time from the sim's per-object checkpoints + the number

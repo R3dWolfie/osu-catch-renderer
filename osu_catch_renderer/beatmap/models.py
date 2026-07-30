@@ -157,6 +157,12 @@ class RenderConfig:
     # anchored). Mirrors the taiko renderer's pp_override -- see
     # scene.compute_pp_curve + lazer_results.CatchLazerResults.
     pp_override: float | None = None
+    # EXACT star rating to display (osu's OFFICIAL SR, supplied by the service
+    # via --sr). None -> keep the rosu SR estimate. When set, the results
+    # card's star-rating pill shows this value exactly. Static display value
+    # (no live SR counter). Mirrors pp_override -- see
+    # lazer_results.CatchLazerResults.
+    sr_override: float | None = None
     watermark: str = ""                # bottom-right branding (free renders forced to site URL)
     # audio (0..100 from preset; 100 = unchanged)
     music_volume: int = 100

@@ -507,7 +507,8 @@ def render_core(
                         rgb = draw_results(rgb, meta, bm, op, board=baked_board,
                                            age_ms=float(t - results_start_ms),
                                            osu_path=osu_path, sim=sim,
-                                           pp_override=cfg.pp_override)
+                                           pp_override=cfg.pp_override,
+                                           sr_override=cfg.sr_override)
                     writer.push(rgb)
                 if progress_callback and i % cfg.fps == 0:
                     progress_callback(int(i / n_frames * 100))

@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
                          "results card + the live counter's ENDPOINT are "
                          "pinned to this; the live curve keeps its rosu "
                          "shape. Omit to keep the rosu estimate.")
+    ap.add_argument("--sr", type=float, default=None,
+                    help="EXACT star rating to show (osu's OFFICIAL SR). The "
+                         "results card's star-rating pill is pinned to this. "
+                         "Omit to keep the rosu SR estimate.")
     ap.add_argument("--hit-counter", action=BA, default=True)
     ap.add_argument("--key-counter", action=BA, default=True,
                     help="Argon key counter bottom-right (B1/B2/B3 = "
@@ -144,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         banana_rainbow=args.banana_rainbow,
         show_pp_counter=args.pp_counter,
         pp_override=args.pp,
+        sr_override=args.sr,
         show_hit_counter=args.hit_counter,
         show_key_counter=args.key_counter,
         watermark=args.watermark,
