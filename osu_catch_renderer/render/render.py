@@ -383,7 +383,8 @@ def render_core(
     # + the mania v2 loudnorm-duck fix this mirrors). Fully fail-soft — any
     # problem leaves the song-only chain (renders unchanged).
     hits_wav = None
-    if audio is not None and getattr(cfg, "hitsounds", True):
+    if audio is not None and (getattr(cfg, "hitsounds", True)
+                              or getattr(cfg, "nightcore_hitsounds", False)):
         try:
             from osu_catch_renderer.beatmap.hitsounds import build_hitsound_track, synth_style_for
             objs, caught_flags = base_sim.catch_events()
@@ -402,7 +403,9 @@ def render_core(
                 out_wav=output_path.with_suffix(".hits.wav"),
                 start_ms=start_ms, rate=rate,
                 duration_ms=total_dur_s * 1000.0,
-                synth_style=synth_style_for(has_custom))
+                synth_style=synth_style_for(has_custom),
+                nightcore=getattr(cfg, "nightcore_hitsounds", False),
+                hitsounds_on=getattr(cfg, "hitsounds", True))
         except Exception as e:  # noqa: BLE001 — hitsounds never break a render
             print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
             hits_wav = None

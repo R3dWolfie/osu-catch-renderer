@@ -348,13 +348,65 @@ class SampleBank:
         return out
 
 
+# --- beat overlay (metronome) -------------------------------------------------
+
+_METRONOME_GAIN = 0.35        # beat-overlay click sits under the caught hits
+
+
+def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
+    """Beat-overlay metronome (site 'Beat overlay (metronome)' toggle): a clap
+    on every beat + a finish on every downbeat, across the whole song, mixed
+    into the caught-object hitsound track. Beats come from the beatmap's
+    uninherited (red) timing points (assumed 4/4, matching the mania v2
+    overlay). Placed in VIDEO time ((t_map - start_ms)/rate) so DT/NC/HT stay
+    beat-aligned; the clap/finish PCM keeps natural pitch (stable behaviour).
+    Mod-INDEPENDENT — a general metronome, not gated on the NC mod. Returns
+    beats laid."""
+    timing = getattr(bm, "timing", None)
+    pts = getattr(timing, "points", None) if timing else None
+    if not pts:
+        return 0
+    reds = [(t, v) for (t, v, uninh) in pts if uninh and v > 0]
+    if not reds:
+        return 0
+    default_set = getattr(bm, "sample_set_default", 1) or 1
+    rate = rate or 1.0
+    horizon = start_ms + (n / SAMPLE_RATE * 1000.0) * rate
+    laid = 0
+    for i, (ptime, beat) in enumerate(reds):
+        beat = max(60.0, float(beat))          # cap <60ms (>1000 BPM) sanity
+        seg_end = reds[i + 1][0] if i + 1 < len(reds) else horizon
+        seg_end = min(seg_end, horizon)
+        k = 0
+        t = float(ptime)
+        while t < seg_end:
+            downbeat = (k % 4 == 0)
+            if hasattr(timing, "sample_info"):
+                tp_set, tp_idx, _tp_vol = timing.sample_info(t)
+            else:
+                tp_set, tp_idx = 0, 0
+            base = tp_set if tp_set in SET_NAMES else default_set
+            pcm, _src = bank.get(base, "hitfinish" if downbeat else "hitclap",
+                                 tp_idx)
+            start = int(((t - start_ms) / rate) / 1000.0 * SAMPLE_RATE)
+            if 0 <= start < n and len(pcm):
+                end = min(n, start + len(pcm))
+                track[start:end] += pcm[:end - start] * _METRONOME_GAIN
+                laid += 1
+            k += 1
+            t = ptime + k * beat
+    return laid
+
+
 # --- track build --------------------------------------------------------------
 
 def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
                          skin_dirs=(), out_wav: Path, start_ms: float,
                          rate: float = 1.0, duration_ms: float,
                          synth_style: str = "argon",
-                         gain: float = DEFAULT_HIT_GAIN) -> Path | None:
+                         gain: float = DEFAULT_HIT_GAIN,
+                         nightcore: bool = False,
+                         hitsounds_on: bool = True) -> Path | None:
     """Mix every CAUGHT object's resolved samples at its catch time into one
     stereo WAV on the VIDEO time axis (wall = (t_map - start_ms)/rate — the
     same compression the video applies; sample PCM keeps natural pitch,
@@ -386,7 +438,8 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
         track[start:end] += pcm[:end - start] * vol
         placed += 1
 
-    for obj, is_caught in zip(objs, caught):
+    _obj_iter = zip(objs, caught) if hitsounds_on else iter(())
+    for obj, is_caught in _obj_iter:
         s = getattr(obj, "sample", None)
         if not is_caught or s is None:
             continue   # misses (and tiny droplets) are silent — lazer/stable
@@ -442,7 +495,11 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
                               "set": sset, "index": idx, "vol": vol,
                               "src": src, "peak": _peak(pcm) * vol})
 
-    if placed == 0:
+    nc_beats = 0
+    if nightcore:
+        nc_beats = _layer_metronome_catch(track, bm, bank, start_ms, rate, n)
+
+    if placed == 0 and nc_beats == 0:
         return None
     np.clip(track, -1.0, 1.0, out=track)
     out_wav = Path(out_wav)
@@ -452,7 +509,7 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
     sc = bank.source_counts
     print(f"[catch-renderer] hitsounds: {placed} samples placed "
           f"(sources beatmap={sc['beatmap']} skin={sc['skin']} "
-          f"synth={sc['synth']}) -> {out_wav.name}",
+          f"synth={sc['synth']}) + {nc_beats} metronome beats -> {out_wav.name}",
           file=sys.stderr, flush=True)
     return out_wav
 

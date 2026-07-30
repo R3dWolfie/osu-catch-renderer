@@ -171,6 +171,10 @@ class RenderConfig:
     # overrides); resolution then starts at the skin chain. Mirrors the
     # site preset "Use the beatmap's hitsounds".
     beatmap_hitsounds: bool = True
+    # Beat overlay (metronome): clap each beat + finish each downbeat across the
+    # whole song, mixed into the hitsound track. Off by default; the site's
+    # "Beat overlay (metronome)" toggle. Mod-independent (a general metronome).
+    nightcore_hitsounds: bool = False
     # background (% dim 0..100; higher = darker. blur in px)
     bg_dim_intro: int = 0
     bg_dim_game: int = 70

@@ -76,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
                          "(default)")
     ap.add_argument("--hitsound-volume", type=int, default=100,
                     help="hitsound track volume 0-100 (default 100)")
+    ap.add_argument("--nightcore-hitsounds", action=BA, default=False,
+                    help="beat overlay (metronome): clap each beat + finish "
+                         "each downbeat across the whole song (mod-independent)")
     ap.add_argument("--bg-dim-intro", type=int, default=0)
     ap.add_argument("--bg-dim-game", type=int, default=70)
     ap.add_argument("--bg-dim-breaks", type=int, default=0)
@@ -154,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         not in ("off", "none", "0", "false", "no"),
         hitsound_volume=max(0, min(100, args.hitsound_volume)),
         beatmap_hitsounds=args.beatmap_hitsounds,
+        nightcore_hitsounds=args.nightcore_hitsounds,
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=args.bg_dim_game,
         bg_dim_breaks=args.bg_dim_breaks,
