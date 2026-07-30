@@ -935,7 +935,7 @@ class CatchLazerResults:
     frame on catch's CPU compositor, then caches the settled frame."""
 
     def __init__(self, resolution, meta, bm, board=None, osu_path=None,
-                 sim=None):
+                 sim=None, pp_override=None):
         self.W, self.H = int(resolution[0]), int(resolution[1])
         self.k = self.H / UH
         self.meta = meta
@@ -963,6 +963,15 @@ class CatchLazerResults:
         self.miss_display = meta.count_miss
         self.stars, self.pp, self.max_pp = _compute_stars_pp(
             osu_path, meta.mods, meta)
+        # --pp: pin the results-card PP to the EXACT official pp passed by
+        # the service (RenderConfig.pp_override), overriding the rosu
+        # estimate. Every results PP consumer reads self.pp -- the PP grid
+        # cell, the stage-2 PP perf bar (against the rosu SS ceiling
+        # self.max_pp, kept), and the "Achieved Npp" footer -- so all three
+        # show the official value. max_pp/stars stay rosu. None -> unchanged
+        # rosu pp. Mirrors the taiko _final_pp override.
+        if pp_override is not None:
+            self.pp = float(pp_override)
 
         # --- stage-2 source data (real catch data; never faked) -------------
         # combo-over-time from the sim's per-object checkpoints + the number

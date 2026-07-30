@@ -933,6 +933,23 @@ class CatchSim:
             hi = min((k for k in keys if k >= i), default=lo)
             cp.pp = samples[lo] if hi == lo else (
                 samples[lo] + (samples[hi] - samples[lo]) * (i - lo) / (hi - lo))
+        # --pp: pin the live pp counter's ENDPOINT to the EXACT official pp
+        # passed via --pp (RenderConfig.pp_override). Scale the whole
+        # checkpoint curve by a constant (official / rosu_final) so the
+        # counter keeps its rosu/score-progress SHAPE and only its endpoint
+        # eases onto the passed value -- mirrors the taiko _final_pp
+        # endpoint-anchor. The results card is pinned separately
+        # (CatchLazerResults). No-op when --pp is absent.
+        ov = getattr(self.cfg, "pp_override", None)
+        if ov is not None:
+            rosu_final = cps[-1].pp if cps else 0.0
+            if rosu_final and rosu_final > 0:
+                scale = float(ov) / rosu_final
+                for cp in cps:
+                    cp.pp *= scale
+            else:  # rosu gave 0 / no final -> just show the flat official value
+                for cp in cps:
+                    cp.pp = float(ov)
 
     # --- sprite emission ------------------------------------------------------
 

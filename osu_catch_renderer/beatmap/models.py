@@ -150,6 +150,13 @@ class RenderConfig:
     show_pp_counter: bool = True        # running pp counter (needs rosu-pp-py)
     show_hit_counter: bool = True       # 300/100/50/miss tallies
     show_key_counter: bool = True       # Argon key counter (B1/B2/B3), bottom-right
+    # EXACT final pp to display (osu's OFFICIAL pp, supplied by the service
+    # via --pp). None -> keep the rosu estimate. When set, the results-card
+    # PP AND the live counter's ENDPOINT are pinned to this value (the live
+    # curve keeps its rosu/score-progress SHAPE; only the endpoint is
+    # anchored). Mirrors the taiko renderer's pp_override -- see
+    # scene.compute_pp_curve + lazer_results.CatchLazerResults.
+    pp_override: float | None = None
     watermark: str = ""                # bottom-right branding (free renders forced to site URL)
     # audio (0..100 from preset; 100 = unchanged)
     music_volume: int = 100

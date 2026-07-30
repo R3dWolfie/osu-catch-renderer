@@ -52,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dash-trail", action=BA, default=True)
     ap.add_argument("--banana-rainbow", action=BA, default=True)
     ap.add_argument("--pp-counter", action=BA, default=True)
+    ap.add_argument("--pp", type=float, default=None,
+                    help="EXACT final pp to show (osu's OFFICIAL pp). The "
+                         "results card + the live counter's ENDPOINT are "
+                         "pinned to this; the live curve keeps its rosu "
+                         "shape. Omit to keep the rosu estimate.")
     ap.add_argument("--hit-counter", action=BA, default=True)
     ap.add_argument("--key-counter", action=BA, default=True,
                     help="Argon key counter bottom-right (B1/B2/B3 = "
@@ -135,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         catcher_dash_trail=args.dash_trail,
         banana_rainbow=args.banana_rainbow,
         show_pp_counter=args.pp_counter,
+        pp_override=args.pp,
         show_hit_counter=args.hit_counter,
         show_key_counter=args.key_counter,
         watermark=args.watermark,
