@@ -406,8 +406,9 @@ def render_core(
         except Exception as e:  # noqa: BLE001 — hitsounds never break a render
             print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
             hits_wav = None
+    is_nc = bool(int(getattr(meta, "mods", 0) or 0) & 512)   # Nightcore bit
     proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s,
-                         hitsound_wav=hits_wav)
+                         hitsound_wav=hits_wav, is_nc=is_nc)
     # Argon is the DEFAULT skin: skinless renders stay all-Argon (parity with
     # the STD renderer). DanserHud now handles skin_dir=None; plain _Hud only if
     # DanserHud fails to build.
@@ -604,7 +605,7 @@ def nvenc_target_bps(w: int, h: int, fps: float) -> int:
 
 def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                   start_ms: int, rate: float = 1.0, total_dur_s: float | None = None,
-                  hitsound_wav: Path | None = None):
+                  hitsound_wav: Path | None = None, is_nc: bool = False):
     w, h = cfg.resolution
     enc, dev = _probe_encoder(cfg)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
@@ -640,13 +641,14 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                 music_volume=cfg.music_volume,
                 general_volume=cfg.general_volume,
                 audio_offset_ms=cfg.audio_offset_ms,
-                hitsound_volume=getattr(cfg, "hitsound_volume", 100))
+                hitsound_volume=getattr(cfg, "hitsound_volume", 100),
+                is_nc=is_nc)
             cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
         else:
             af = _audio_filter(start_ms, rate, total_dur_s,
                                music_volume=cfg.music_volume,
                                general_volume=cfg.general_volume,
-                               audio_offset_ms=cfg.audio_offset_ms)
+                               audio_offset_ms=cfg.audio_offset_ms, is_nc=is_nc)
             if af:
                 cmd += ["-af", af]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
@@ -666,12 +668,23 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
 
 def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = None,
                   music_volume: int = 100, general_volume: int = 100,
-                  audio_offset_ms: int = 0) -> str:
+                  audio_offset_ms: int = 0, is_nc: bool = False) -> str:
     """Speed the song to the mod rate (DT/HT), then align so video t=0 is
     `start_ms` into the rate-adjusted song. Applies preset volume + offset."""
     parts = []
     if abs(rate - 1.0) > 1e-3:
-        parts.append(f"atempo={rate:.4f}")  # speed only (no pitch shift)
+        if is_nc:
+            # Nightcore = a PURE RESAMPLE: speed AND pitch up together by the
+            # rate, exactly like osu (and the mania v2 / taiko renderers).
+            # Reinterpreting the samples at SR*rate then resampling back to SR is
+            # artifact-free. The old atempo was speed-ONLY (pitch preserved), so
+            # catch NC never pitched up (wrong). Normalise to 44100 first so a
+            # 48 kHz master still speeds by exactly `rate` — asetrate is absolute.
+            parts.append("aresample=44100")
+            parts.append(f"asetrate={int(round(44100 * rate))}")
+            parts.append("aresample=44100")
+        else:
+            parts.append(f"atempo={rate:.4f}")  # DT/HT: pitch-preserving speed
     # start_ms is in MAP time; after atempo the song plays at map/rate, so the
     # real offset where video t=0 lands is start_ms/rate. audio_offset shifts the
     # song vs gameplay (negative = audio earlier).
@@ -704,7 +717,8 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
                              music_volume: int = 100,
                              general_volume: int = 100,
                              audio_offset_ms: int = 0,
-                             hitsound_volume: int = 100) -> str:
+                             hitsound_volume: int = 100,
+                             is_nc: bool = False) -> str:
     """The hitsound-enabled audio graph. The SONG chain reproduces
     _audio_filter exactly (atempo -> align -> loudnorm -> volume) so the
     music bed is bit-identical to a hitsound-less render; the pre-mixed hits
@@ -716,7 +730,14 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
     master x effect), not music volume."""
     song = []
     if abs(rate - 1.0) > 1e-3:
-        song.append(f"atempo={rate:.4f}")
+        if is_nc:
+            # NC = pure resample (speed + pitch); see _audio_filter. Keeps the
+            # song chain identical to the hitsound-less render.
+            song.append("aresample=44100")
+            song.append(f"asetrate={int(round(44100 * rate))}")
+            song.append("aresample=44100")
+        else:
+            song.append(f"atempo={rate:.4f}")
     real_start = (start_ms - audio_offset_ms) / rate
     if real_start > 0:
         song.append(f"atrim=start={real_start / 1000:.3f}")
