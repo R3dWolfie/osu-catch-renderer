@@ -347,6 +347,20 @@ class SampleBank:
         self.source_counts[out[1]] += 1
         return out
 
+    def nc_sample(self, base: str) -> np.ndarray | None:
+        """ModNightcore skin sample (nightcore-kick/-clap/-hat/-finish) through
+        the SKIN chain only — no synth fallback. A skin that ships a SILENT
+        nightcore sample plays (near-)nothing; a skin that omits it plays
+        nothing (None)."""
+        for d in self.skin_dirs:
+            for ext in SAMPLE_EXTS:
+                p = d / f"{base}{ext}"
+                if p.is_file():
+                    pcm = self._load(p)
+                    if pcm is not None:
+                        return pcm
+        return None
+
 
 # --- beat overlay (metronome) -------------------------------------------------
 
@@ -398,6 +412,72 @@ def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
     return laid
 
 
+# --- ModNightcore beat overlay (NC-mod-gated, distinct from the metronome) -----
+
+_NC_MOD_GAIN = 0.5        # nightcore-kick/clap/hat/finish drums
+
+
+def _layer_nightcore_mod_catch(track, bm, bank, start_ms, rate, n,
+                               *, play_hats: bool = True) -> int:
+    """osu! ModNightcore beat overlay — the drum pattern osu! plays on each
+    beat AUTOMATICALLY while the Nightcore mod is active. NOT the general
+    metronome (_layer_metronome_catch) above; both can lay. Half-beat grid
+    (BeatSyncedContainer Divisor=2): per 4/4 bar, kick on beats 1 & 3, clap on
+    2 & 4, hat on the off-beats, plus a finish cymbal at the start of every 4th
+    bar — from the SKIN's nightcore-kick/-clap/-hat/-finish samples (silent
+    sample → silence; missing sample → skipped, no synth). Beats come from the
+    beatmap's uninherited (red) timing points (assumed 4/4 — catch stores no
+    signature); placed in VIDEO time ((t-start)/rate) so they ride the sped-up
+    track. Hats gate on SliderTickRate%2==0. Returns samples laid.
+
+    Port of osu.Game/Rulesets/Mods/ModNightcore.NightcoreBeatContainer."""
+    timing = getattr(bm, "timing", None)
+    pts = getattr(timing, "points", None) if timing else None
+    if not pts:
+        return 0
+    reds = [(t, v) for (t, v, uninh) in pts if uninh and v > 0]
+    if not reds:
+        return 0
+    samples = {name: bank.nc_sample(f"nightcore-{name}")
+               for name in ("kick", "clap", "hat", "finish")}
+    if not any(v is not None for v in samples.values()):
+        return 0
+    rate = rate or 1.0
+    horizon = start_ms + (n / SAMPLE_RATE * 1000.0) * rate
+    seg_len = 4 * 8                            # 4/4: beatsPerBar(4) * 2 * 4 bars
+    laid = 0
+    for i, (ptime, beat) in enumerate(reds):
+        beat = max(60.0, float(beat))          # cap <60ms (>1000 BPM) sanity
+        half = beat / 2.0
+        seg_end = reds[i + 1][0] if i + 1 < len(reds) else horizon
+        seg_end = min(seg_end, horizon)
+        k = 0
+        t = float(ptime)
+        while t < seg_end:
+            bseg = k % seg_len
+            r = bseg % 4
+            names = []
+            if r == 0:
+                names.append("kick")
+            elif r == 2:
+                names.append("clap")
+            elif play_hats:
+                names.append("hat")
+            if bseg == 0:
+                names.append("finish")
+            start = int(((t - start_ms) / rate) / 1000.0 * SAMPLE_RATE)
+            if 0 <= start < n:
+                for name in names:
+                    pcm = samples.get(name)
+                    if pcm is not None and len(pcm):
+                        end = min(n, start + len(pcm))
+                        track[start:end] += pcm[:end - start] * _NC_MOD_GAIN
+                        laid += 1
+            k += 1
+            t = ptime + k * half
+    return laid
+
+
 # --- track build --------------------------------------------------------------
 
 def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
@@ -406,6 +486,7 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
                          synth_style: str = "argon",
                          gain: float = DEFAULT_HIT_GAIN,
                          nightcore: bool = False,
+                         nc_mod: bool = False,
                          hitsounds_on: bool = True) -> Path | None:
     """Mix every CAUGHT object's resolved samples at its catch time into one
     stereo WAV on the VIDEO time axis (wall = (t_map - start_ms)/rate — the
@@ -499,7 +580,15 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
     if nightcore:
         nc_beats = _layer_metronome_catch(track, bm, bank, start_ms, rate, n)
 
-    if placed == 0 and nc_beats == 0:
+    # ModNightcore beat overlay — AUTOMATIC when the NC mod is active,
+    # independent of the `nightcore` metronome toggle above (both may lay).
+    nc_mod_beats = 0
+    if nc_mod:
+        play_hats = (int(round(getattr(bm, "tick_rate", 1.0) or 1.0)) % 2 == 0)
+        nc_mod_beats = _layer_nightcore_mod_catch(track, bm, bank, start_ms,
+                                                  rate, n, play_hats=play_hats)
+
+    if placed == 0 and nc_beats == 0 and nc_mod_beats == 0:
         return None
     np.clip(track, -1.0, 1.0, out=track)
     out_wav = Path(out_wav)
@@ -509,7 +598,8 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
     sc = bank.source_counts
     print(f"[catch-renderer] hitsounds: {placed} samples placed "
           f"(sources beatmap={sc['beatmap']} skin={sc['skin']} "
-          f"synth={sc['synth']}) + {nc_beats} metronome beats -> {out_wav.name}",
+          f"synth={sc['synth']}) + {nc_beats} metronome beats "
+          f"+ {nc_mod_beats} NC-mod beats -> {out_wav.name}",
           file=sys.stderr, flush=True)
     return out_wav
 

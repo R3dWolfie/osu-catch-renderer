@@ -383,8 +383,11 @@ def render_core(
     # + the mania v2 loudnorm-duck fix this mirrors). Fully fail-soft — any
     # problem leaves the song-only chain (renders unchanged).
     hits_wav = None
+    # ModNightcore beat overlay is AUTOMATIC when the NC mod (bit 512) is on.
+    is_nc = bool(int(getattr(meta, "mods", 0) or 0) & 512)   # Nightcore bit
     if audio is not None and (getattr(cfg, "hitsounds", True)
-                              or getattr(cfg, "nightcore_hitsounds", False)):
+                              or getattr(cfg, "nightcore_hitsounds", False)
+                              or is_nc):
         try:
             from osu_catch_renderer.beatmap.hitsounds import build_hitsound_track, synth_style_for
             objs, caught_flags = base_sim.catch_events()
@@ -405,11 +408,11 @@ def render_core(
                 duration_ms=total_dur_s * 1000.0,
                 synth_style=synth_style_for(has_custom),
                 nightcore=getattr(cfg, "nightcore_hitsounds", False),
+                nc_mod=is_nc,
                 hitsounds_on=getattr(cfg, "hitsounds", True))
         except Exception as e:  # noqa: BLE001 — hitsounds never break a render
             print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
             hits_wav = None
-    is_nc = bool(int(getattr(meta, "mods", 0) or 0) & 512)   # Nightcore bit
     proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s,
                          hitsound_wav=hits_wav, is_nc=is_nc)
     # Argon is the DEFAULT skin: skinless renders stay all-Argon (parity with
