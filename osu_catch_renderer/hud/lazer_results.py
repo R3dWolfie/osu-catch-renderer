@@ -942,6 +942,15 @@ class CatchLazerResults:
         self.bm = bm
         self.board = board                 # lb_cards.BakedBoard | None
         self._settled = None               # cached final RGB frame
+        # pose-signature frame memo (PERF, output-identical): every animated
+        # parameter of the screen is a CLAMPED pure function of (op, age_ms),
+        # so once they all saturate — or hold between animation phases — the
+        # rendered frame is a pure function of the signature. Reusing the
+        # previous frame whenever the signature is unchanged skips the whole
+        # composite for the static tail of the outro (~1/5 of it) without
+        # touching a single animated frame.
+        self._pose_key = None
+        self._pose_frame = None
         self._arc_img = None
         self._arc_bucket = -1.0
         self._score_img = None
@@ -1247,6 +1256,10 @@ class CatchLazerResults:
         settled = op >= 0.999 and age_ms >= SETTLE_MS
         if settled and self._settled is not None:
             return self._settled
+        sig = self._pose_signature(op, age_ms)
+        if sig is not None and sig == self._pose_key \
+                and self._pose_frame is not None:
+            return self._pose_frame
 
         # BLACK background: std's scene has faded to black by results_start
         # and the screen dims what's left — the results sit on clean black.
@@ -1287,7 +1300,41 @@ class CatchLazerResults:
         out = np.asarray(base.convert("RGB"))
         if settled:
             self._settled = out
+        if sig is not None:
+            self._pose_key, self._pose_frame = sig, out
         return out
+
+    def _pose_signature(self, op, age_ms):
+        """Tuple of EVERY animated parameter render_frame consumes for
+        (op, age_ms) — all of them clamped easings, so the tuple saturates
+        when the animation does. None disables the memo (fail-safe)."""
+        try:
+            op = _clamp01(op)
+            fade = _clamp01(age_ms / FADE_MS) * op
+            stage2 = getattr(self, "_stage2", False)
+            open_p = ease_out_quint((age_ms - STAGE1_MS) / OPEN_MS) \
+                if (stage2 and age_ms > STAGE1_MS) else 0.0
+            stage1_a = fade * (1.0 - _clamp01((age_ms - STAGE1_MS)
+                                              / (OPEN_MS * 0.6))) \
+                if stage2 else fade
+            lb = None
+            if self.board is not None and fade > 0.003 and stage1_a > 0.003:
+                lb = tuple(self._lb_slide(c.stagger, age_ms)
+                           for c in (getattr(self.board, "cards", []) or []))
+            # featured panel internals (arc sweep / grade punch / score roll)
+            sweep = ease_out_cubic((age_ms - SWEEP_DELAY_MS) / SWEEP_MS) \
+                if age_ms > SWEEP_DELAY_MS else 0.0
+            arc_bucket = round(self.target_arc * sweep, 3)
+            score_val = int(round(int(self.meta.score) * sweep))
+            badge_start = SWEEP_DELAY_MS + SWEEP_MS - 130.0
+            grade_p = ease_out_cubic((age_ms - badge_start) / BADGE_MS) \
+                if age_ms >= badge_start else None
+            unfold = tuple(self._panel_unfold(age_ms, i) for i in range(3)) \
+                if (stage2 and age_ms > STAGE1_MS) else None
+            return (op, fade, open_p, stage1_a, lb, arc_bucket, score_val,
+                    grade_p, unfold)
+        except Exception:  # noqa: BLE001 — memo is best-effort, never breaks
+            return None
 
     def _blit(self, base, img, cx, top_y, a) -> float:
         """Paste centred at cx with the image TOP at top_y; return height."""
