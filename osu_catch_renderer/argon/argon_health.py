@@ -205,7 +205,10 @@ class ArgonHealth:
         gR = GLOW_PATH_RADIUS * k
         pad_expand = (GLOW_PATH_RADIUS - MAIN_PATH_RADIUS) * k          # glow container grows out
         self.bg = _Layer(box_ox, box_oy, box_w, box_h, R, k)
-        self.main = _Layer(box_ox, box_oy, box_w, box_h, R, k)
+        # main has IDENTICAL geometry to bg and _Layer is immutable after
+        # construction (distance() copies) — share one instance instead of
+        # rebuilding the ~0.24 s distance field (PERF, output-identical).
+        self.main = self.bg
         self.glow = _Layer(box_ox - pad_expand, box_oy - pad_expand,
                            box_w + 2 * pad_expand, box_h + 2 * pad_expand, gR, k)
         # animation state
