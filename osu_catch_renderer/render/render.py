@@ -24,6 +24,7 @@ from osu_catch_renderer.skin.assets import build_textures
 from osu_catch_renderer.beatmap.beatmap import parse_beatmap
 from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer.render.gl import SpriteRenderer
+from osu_catch_renderer.render import loudnorm_cache
 from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms
 from osu_catch_renderer.beatmap.replay import parse_replay
 from osu_catch_renderer.render.scene import CatchSim, mods_score_multiplier
@@ -752,8 +753,27 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         cmd += ["-vaapi_device", dev]
     cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(cfg.fps),
             "-i", "pipe:0"]
+    # Loudnorm PCM cache (shared cross-engine; kill-switch R3D_NO_LOUDNORM_CACHE).
+    # `prenorm` is a raw f32le@48k-stereo file with the rate/pitch change AND
+    # loudnorm ALREADY baked in (full song, keyed on source+rate+pitch+params,
+    # no per-render trim). When present, the song input is this file and the
+    # filtergraph SKIPS the rate/pitch filters + loudnorm, keeping only the
+    # per-render align/volume/apad(+hitsound mix). The post-loudnorm 48k resample
+    # baked into the artifact reframes away loudnorm's look-ahead flush frame, so
+    # a cold miss (build-then-read) and a warm hit (read) are byte-identical
+    # through amix. `None` (kill-switch / cache miss build failure) falls back to
+    # the unchanged inline fused-loudnorm path below.
+    prenorm = None
     if audio is not None:
-        cmd += ["-i", str(audio)]
+        prenorm = loudnorm_cache.get_or_build_normalized(
+            audio, rate=rate, pitch=is_nc)
+        if prenorm is not None:
+            cmd += ["-f", "f32le",
+                    "-ar", str(loudnorm_cache.LOUDNORM_CACHE_SR),
+                    "-ac", str(loudnorm_cache.LOUDNORM_CACHE_CH),
+                    "-i", str(prenorm)]
+        else:
+            cmd += ["-i", str(audio)]
         if hitsound_wav is not None:
             cmd += ["-i", str(hitsound_wav)]
 
@@ -771,6 +791,9 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", "20"]
 
     if audio is not None:
+        # `prenorm` -> canonical builders (rate/pitch + loudnorm are baked into
+        # the cached f32le input); else the original inline fused-loudnorm path.
+        pre = prenorm is not None
         if hitsound_wav is not None:
             # song + hitsound track: -filter_complex (the -af path can't mix a
             # second input). The song chain is IDENTICAL to _audio_filter minus
@@ -781,13 +804,14 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                 general_volume=cfg.general_volume,
                 audio_offset_ms=cfg.audio_offset_ms,
                 hitsound_volume=getattr(cfg, "hitsound_volume", 100),
-                is_nc=is_nc)
+                is_nc=is_nc, pre_normalized=pre)
             cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
         else:
             af = _audio_filter(start_ms, rate, total_dur_s,
                                music_volume=cfg.music_volume,
                                general_volume=cfg.general_volume,
-                               audio_offset_ms=cfg.audio_offset_ms, is_nc=is_nc)
+                               audio_offset_ms=cfg.audio_offset_ms, is_nc=is_nc,
+                               pre_normalized=pre)
             if af:
                 cmd += ["-af", af]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
@@ -816,11 +840,18 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
 
 def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = None,
                   music_volume: int = 100, general_volume: int = 100,
-                  audio_offset_ms: int = 0, is_nc: bool = False) -> str:
+                  audio_offset_ms: int = 0, is_nc: bool = False,
+                  pre_normalized: bool = False) -> str:
     """Speed the song to the mod rate (DT/HT), then align so video t=0 is
-    `start_ms` into the rate-adjusted song. Applies preset volume + offset."""
+    `start_ms` into the rate-adjusted song. Applies preset volume + offset.
+
+    `pre_normalized` = the song input is the shared loudnorm PCM cache artifact
+    (raw f32le@48k with the rate/pitch change AND loudnorm ALREADY baked in), so
+    the rate filters and the inline loudnorm are OMITTED here; only the
+    per-render align/volume/apad remain. When False the chain is byte-for-byte
+    the original fused pipeline (kill-switch / cache-miss fallback)."""
     parts = []
-    if abs(rate - 1.0) > 1e-3:
+    if not pre_normalized and abs(rate - 1.0) > 1e-3:
         if is_nc:
             # Nightcore = a PURE RESAMPLE: speed AND pitch up together by the
             # rate, exactly like osu (and the mania v2 / taiko renderers).
@@ -849,7 +880,9 @@ def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = 
     # Loudness-normalise to a consistent EBU R128 baseline (single-pass) so
     # hot beatmap masters stop blasting: I=-14 LUFS, true-peak -1.5 dBTP.
     # The volume trim below is applied AFTER, relative to this baseline.
-    parts.append("loudnorm=I=-10:TP=-1.5:LRA=11")
+    # (Skipped when pre_normalized: loudnorm is already baked into the cache.)
+    if not pre_normalized:
+        parts.append("loudnorm=I=-10:TP=-1.5:LRA=11")
     vol = (general_volume / 100.0) * (music_volume / 100.0)
     if abs(vol - 1.0) > 1e-3:
         parts.append(f"volume={max(0.0, vol):.3f}")
@@ -866,7 +899,8 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
                              general_volume: int = 100,
                              audio_offset_ms: int = 0,
                              hitsound_volume: int = 100,
-                             is_nc: bool = False) -> str:
+                             is_nc: bool = False,
+                             pre_normalized: bool = False) -> str:
     """The hitsound-enabled audio graph. The SONG chain reproduces
     _audio_filter exactly (atempo -> align -> loudnorm -> volume) so the
     music bed is bit-identical to a hitsound-less render; the pre-mixed hits
@@ -875,9 +909,14 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
     duck the song ~4 dB under every hit (mania v2 LOUDNORM FIX 2026-07-12,
     #17) — then a clamp-only true-peak limiter catches summed peaks and apad
     spans the results outro. Hits take general x hitsound volume (stable's
-    master x effect), not music volume."""
+    master x effect), not music volume.
+
+    `pre_normalized` = the song input is the shared loudnorm PCM cache artifact
+    (rate/pitch + loudnorm already baked in), so the rate filters and the inline
+    loudnorm are OMITTED from the song chain; only align/volume remain before the
+    amix. When False the chain is byte-for-byte the original fused pipeline."""
     song = []
-    if abs(rate - 1.0) > 1e-3:
+    if not pre_normalized and abs(rate - 1.0) > 1e-3:
         if is_nc:
             # NC = pure resample (speed + pitch); see _audio_filter. Keeps the
             # song chain identical to the hitsound-less render.
@@ -892,10 +931,14 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
         song.append("asetpts=PTS-STARTPTS")
     elif real_start < 0:
         song.append(f"adelay={int(-real_start)}:all=1")
-    song.append("loudnorm=I=-10:TP=-1.5:LRA=11")
+    if not pre_normalized:
+        song.append("loudnorm=I=-10:TP=-1.5:LRA=11")
     vol = (general_volume / 100.0) * (music_volume / 100.0)
     if abs(vol - 1.0) > 1e-3:
         song.append(f"volume={max(0.0, vol):.3f}")
+    # A pre-normalised song with no per-render align/volume has an EMPTY chain;
+    # feed [1:a] straight through anull so the [song] label is still valid.
+    song_str = ",".join(song) if song else "anull"
     hvol = (general_volume / 100.0) * (hitsound_volume / 100.0)
     hits = ([f"volume={max(0.0, hvol):.3f}"] if abs(hvol - 1.0) > 1e-3
             else ["anull"])
@@ -905,7 +948,7 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
         tail.append(f"apad=whole_dur={total_dur_s:.3f}")
     else:
         tail.append("apad")
-    return (f"[1:a]{','.join(song)}[song];"
+    return (f"[1:a]{song_str}[song];"
             f"[2:a]{','.join(hits)}[hits];"
             f"[song][hits]{','.join(tail)}[aout]")
 
