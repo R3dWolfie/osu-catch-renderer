@@ -54,6 +54,9 @@ import numpy as np
 SAMPLE_RATE = 44100
 CHANNELS = 2
 SAMPLE_EXTS = (".wav", ".ogg", ".mp3")   # stable GetSample extension order
+# Bundled osu! DEFAULT nightcore drums (ppy/osu-resources Legacy skin) — final
+# fallback for the NC-mod overlay when the skin OMITS a nightcore sample.
+_DEFAULT_NC_DIR = Path(__file__).resolve().parent.parent / "assets" / "default_nightcore"
 SET_NAMES = {1: "normal", 2: "soft", 3: "drum"}
 ADDITIONS = ((2, "hitwhistle"), (4, "hitfinish"), (8, "hitclap"))
 # global hit gain over per-event volume — the mania v2 DEFAULT_HIT_GAIN
@@ -348,13 +351,16 @@ class SampleBank:
         return out
 
     def nc_sample(self, base: str) -> np.ndarray | None:
-        """ModNightcore skin sample (nightcore-kick/-clap/-hat/-finish) through
-        the SKIN chain only — no synth fallback. A skin that ships a SILENT
-        nightcore sample plays (near-)nothing; a skin that omits it plays
-        nothing (None)."""
-        for d in self.skin_dirs:
+        """ModNightcore sample (nightcore-kick/-clap/-hat/-finish): the SKIN
+        chain first, then the bundled osu! DEFAULT as the FINAL fallback. A skin
+        that ships a SILENT nightcore file plays (near-)silence (skin wins); a
+        skin that OMITS it falls back to the default (osu! default-skin parity).
+        No synth."""
+        for d in list(self.skin_dirs) + [_DEFAULT_NC_DIR]:
+            if not d or not Path(d).is_dir():
+                continue
             for ext in SAMPLE_EXTS:
-                p = d / f"{base}{ext}"
+                p = Path(d) / f"{base}{ext}"
                 if p.is_file():
                     pcm = self._load(p)
                     if pcm is not None:
@@ -576,8 +582,10 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
                               "set": sset, "index": idx, "vol": vol,
                               "src": src, "peak": _peak(pcm) * vol})
 
+    # The general metronome is SUPPRESSED while NC is active (the NC drum
+    # overlay plays instead — osu! never plays both on one render).
     nc_beats = 0
-    if nightcore:
+    if nightcore and not nc_mod:
         nc_beats = _layer_metronome_catch(track, bm, bank, start_ms, rate, n)
 
     # ModNightcore beat overlay — AUTOMATIC when the NC mod is active,
