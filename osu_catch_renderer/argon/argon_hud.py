@@ -800,7 +800,12 @@ class ArgonHud:
         # constant; the fill pill is cached per width (frac moves ~1px/frame,
         # so consecutive frames usually reuse the previous bake).
         self._pill_bg_b = self._pill_bg[..., None]
-        self._fill_pill: tuple | None = None       # (fw, alpha-with-axis)
+        # (output-identical) constant blend terms, precomputed once instead of
+        # per frame: 1-a and 0.2*255*a for the bg-pill src-over composite.
+        self._pill_bg_om = 1.0 - self._pill_bg_b
+        self._pill_bg_tm = (0.2 * 255.0) * self._pill_bg_b
+        self._fill_pill: tuple | None = None       # (fw, 1-a, 0.9*255*a)
+        self._info_memo: tuple | None = None       # (cur, left) -> baked row
 
     def draw_progress(self, img, t: float) -> None:
         """The Argon progress strip: faint density graph (additive), the
@@ -812,9 +817,9 @@ class ArgonHud:
             img.crop((sx0, sy0, sx1, sy1)), dtype=np.float32)
         # density graph — additive
         region += self._graph_add
-        # bar background pill — over
-        a = self._pill_bg_b
-        region = region * (1.0 - a) + (0.2 * 255.0) * a
+        # bar background pill — over (precomputed constant terms; identical
+        # math to region*(1-a) + 51*a evaluated per frame)
+        region = region * self._pill_bg_om + self._pill_bg_tm
         # fill pill — over
         frac = (t - self.first_t) / max(self.last_t - self.first_t, 1.0)
         frac = _clamp01(frac) if t >= self.first_t else 0.0
@@ -823,10 +828,9 @@ class ArgonHud:
             if self._fill_pill is None or self._fill_pill[0] != fw:
                 fa = (bake_pill_alpha(fw, sy1 - sy0)
                       * (0.95 * self.op))[..., None]
-                self._fill_pill = (fw, fa)
-            fa = self._fill_pill[1]
-            region[:, :fw] = (region[:, :fw] * (1.0 - fa)
-                              + (0.9 * 255.0) * fa)
+                self._fill_pill = (fw, 1.0 - fa, (0.9 * 255.0) * fa)
+            _, f_om, f_tm = self._fill_pill
+            region[:, :fw] = region[:, :fw] * f_om + f_tm
         img.paste(Image.fromarray(
             np.clip(region, 0.0, 255.0).astype(np.uint8), "RGB"),
             (sx0, sy0))

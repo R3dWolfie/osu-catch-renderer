@@ -262,20 +262,26 @@ class ArgonHealth:
         yb = min(H, max(l.oy + l.h_px for l in layers))
         return xa, ya, xb, yb
 
-    def _composite_additive(self, img, layer, rgb, a):
-        x0, y0 = layer.ox - self._orig[0], layer.oy - self._orig[1]
-        H, W = img.shape[:2]
-        xa, ya = max(0, x0), max(0, y0)
-        xb, yb = min(W, x0 + layer.w_px), min(H, y0 + layer.h_px)
-        if xb <= xa or yb <= ya:
-            return
-        lx0, ly0 = xa - x0, ya - y0
-        sub = img[ya:yb, xa:xb].astype(np.float32)
-        ar = a[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)][..., None]
-        cr = rgb[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)] * 255.0
-        img[ya:yb, xa:xb] = np.clip(sub + cr * ar, 0, 255).astype(np.uint8)
+    # PERF (output-identical): the per-frame composites used to rebuild the
+    # colour terms — (1-a), rgb*255*a — from the cached (rgb, a) layer EVERY
+    # frame. Those terms are pure functions of the cached layer, so they are
+    # now precomputed ONCE when a layer cache is (re)filled (_prep_add /
+    # _prep_over) and the composite is a single fused multiply-add over the
+    # crop. Elementwise ops commute with slicing, so the values are
+    # bit-identical to the old per-frame computation.
 
-    def _composite_over(self, img, layer, rgb, a):
+    @staticmethod
+    def _prep_add(rgb, a):
+        """Precompute the additive term rgb*255*a (broadcast-ready)."""
+        return (rgb * 255.0) * a[..., None]
+
+    @staticmethod
+    def _prep_over(rgb, a):
+        """Precompute (1-a, rgb*255*a) for the src-over composite."""
+        ab = a[..., None]
+        return 1.0 - ab, (rgb * 255.0) * ab
+
+    def _composite_additive(self, img, layer, tm):
         x0, y0 = layer.ox - self._orig[0], layer.oy - self._orig[1]
         H, W = img.shape[:2]
         xa, ya = max(0, x0), max(0, y0)
@@ -284,9 +290,21 @@ class ArgonHealth:
             return
         lx0, ly0 = xa - x0, ya - y0
         sub = img[ya:yb, xa:xb].astype(np.float32)
-        ar = a[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)][..., None]
-        cr = rgb[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)] * 255.0
-        img[ya:yb, xa:xb] = np.clip(sub * (1.0 - ar) + cr * ar, 0, 255).astype(np.uint8)
+        tms = tm[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)]
+        img[ya:yb, xa:xb] = np.clip(sub + tms, 0, 255).astype(np.uint8)
+
+    def _composite_over(self, img, layer, om, tm):
+        x0, y0 = layer.ox - self._orig[0], layer.oy - self._orig[1]
+        H, W = img.shape[:2]
+        xa, ya = max(0, x0), max(0, y0)
+        xb, yb = min(W, x0 + layer.w_px), min(H, y0 + layer.h_px)
+        if xb <= xa or yb <= ya:
+            return
+        lx0, ly0 = xa - x0, ya - y0
+        sub = img[ya:yb, xa:xb].astype(np.float32)
+        oms = om[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)]
+        tms = tm[ly0:ly0 + (yb - ya), lx0:lx0 + (xb - xa)]
+        img[ya:yb, xa:xb] = np.clip(sub * oms + tms, 0, 255).astype(np.uint8)
 
     def update_draw(self, rgb_arr: np.ndarray, hp: float, dt_ms: float,
                     origin=(0, 0)):
@@ -304,9 +322,8 @@ class ArgonHealth:
         # identical every frame: compute once, composite the cached layer.
         if self._bg_cache is None:
             bd = self.bg.distance(0.0, 1.0)
-            self._bg_cache = _colour_bg(bd, self.bg.R)
-        brgb, ba = self._bg_cache
-        self._composite_over(rgb_arr, self.bg, brgb, ba)
+            self._bg_cache = self._prep_over(*_colour_bg(bd, self.bg.R))
+        self._composite_over(rgb_arr, self.bg, *self._bg_cache)
 
         # 2) glow bar over [hv, max(gv,hv)] (additive)
         lo, hi = hv, max(gv, hv)
@@ -335,9 +352,9 @@ class ArgonHealth:
                 grgb, ga = _colour_bar(gd, self.glow.R, GLOW_GLOW_PORTION,
                                        bar_rgb, 1.0, glow_rgb, glow_a)
                 ga = ga * (0.8 + 0.2 * self.glow.xfrac)    # horizontal gradient
-                self._glow_key, self._glow_cache = gkey, (grgb, ga)
-            grgb, ga = self._glow_cache
-            self._composite_additive(rgb_arr, self.glow, grgb, ga)
+                self._glow_key = gkey
+                self._glow_cache = self._prep_add(grgb, ga)
+            self._composite_additive(rgb_arr, self.glow, self._glow_cache)
 
         # 3) main bar over [0, hv] (additive, white core + blue edge) — pure
         # function of hv; reuse while hv is unchanged.
@@ -346,6 +363,6 @@ class ArgonHealth:
                 md = self.main.distance(0.0, hv)
                 mrgb, ma = _colour_bar(md, self.main.R, MAIN_GLOW_PORTION,
                                        (1.0, 1.0, 1.0), 1.0, GLOW_RGB, GLOW_A)
-                self._main_key, self._main_cache = hv, (mrgb, ma)
-            mrgb, ma = self._main_cache
-            self._composite_additive(rgb_arr, self.main, mrgb, ma)
+                self._main_key = hv
+                self._main_cache = self._prep_add(mrgb, ma)
+            self._composite_additive(rgb_arr, self.main, self._main_cache)
