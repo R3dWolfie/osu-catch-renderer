@@ -30,7 +30,7 @@ from pathlib import Path
 # (mania encode.py LOUDNORM / osu-std _LOUDNORM_FILTER) and to the literal used
 # in render._audio_filter / _hitsound_filter_complex, or the shared cache key
 # diverges and cross-engine reuse silently stops.
-LOUDNORM = "loudnorm=I=-10:TP=-1.5:LRA=11"
+LOUDNORM = "loudnorm=I=-18:TP=-1.5:LRA=11"
 
 # --- contract shared with the sibling engines --------------------------------
 DEFAULT_CACHE_DIR = "/data/r3d/loudnorm-cache"

@@ -878,11 +878,11 @@ def _audio_filter(start_ms: int, rate: float = 1.0, total_dur_s: float | None = 
     # an UNBOUNDED apad races the (slow) raw-video pipe and overflows the
     # filtergraph buffer (ffmpeg reports it as ENOSPC and dies).
     # Loudness-normalise to a consistent EBU R128 baseline (single-pass) so
-    # hot beatmap masters stop blasting: I=-14 LUFS, true-peak -1.5 dBTP.
+    # hot beatmap masters stop blasting: I=-18 LUFS, true-peak -1.5 dBTP.
     # The volume trim below is applied AFTER, relative to this baseline.
     # (Skipped when pre_normalized: loudnorm is already baked into the cache.)
     if not pre_normalized:
-        parts.append("loudnorm=I=-10:TP=-1.5:LRA=11")
+        parts.append("loudnorm=I=-18:TP=-1.5:LRA=11")
     vol = (general_volume / 100.0) * (music_volume / 100.0)
     if abs(vol - 1.0) > 1e-3:
         parts.append(f"volume={max(0.0, vol):.3f}")
@@ -932,7 +932,7 @@ def _hitsound_filter_complex(start_ms: int, rate: float,
     elif real_start < 0:
         song.append(f"adelay={int(-real_start)}:all=1")
     if not pre_normalized:
-        song.append("loudnorm=I=-10:TP=-1.5:LRA=11")
+        song.append("loudnorm=I=-18:TP=-1.5:LRA=11")
     vol = (general_volume / 100.0) * (music_volume / 100.0)
     if abs(vol - 1.0) > 1e-3:
         song.append(f"volume={max(0.0, vol):.3f}")
