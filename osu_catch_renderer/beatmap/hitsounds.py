@@ -373,7 +373,8 @@ class SampleBank:
 _METRONOME_GAIN = 0.14        # beat-overlay click sits under the caught hits
 
 
-def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
+def _layer_metronome_catch(track, bm, bank, start_ms, rate, n,
+                           gameplay_end_ms=None) -> int:
     """Beat-overlay metronome (site 'Beat overlay (metronome)' toggle): a clap
     on every beat + a finish on every downbeat, across the whole song, mixed
     into the caught-object hitsound track. Beats come from the beatmap's
@@ -392,6 +393,8 @@ def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
     default_set = getattr(bm, "sample_set_default", 1) or 1
     rate = rate or 1.0
     horizon = start_ms + (n / SAMPLE_RATE * 1000.0) * rate
+    if gameplay_end_ms is not None:      # stop at gameplay end, not into results
+        horizon = min(horizon, float(gameplay_end_ms))
     laid = 0
     for i, (ptime, beat) in enumerate(reds):
         beat = max(60.0, float(beat))          # cap <60ms (>1000 BPM) sanity
@@ -424,7 +427,8 @@ _NC_MOD_GAIN = 0.20        # nightcore-kick/clap/hat/finish drums
 
 
 def _layer_nightcore_mod_catch(track, bm, bank, start_ms, rate, n,
-                               *, play_hats: bool = True) -> int:
+                               *, play_hats: bool = True,
+                               gameplay_end_ms=None) -> int:
     """osu! ModNightcore beat overlay — the drum pattern osu! plays on each
     beat AUTOMATICALLY while the Nightcore mod is active. NOT the general
     metronome (_layer_metronome_catch) above; both can lay. Half-beat grid
@@ -450,6 +454,8 @@ def _layer_nightcore_mod_catch(track, bm, bank, start_ms, rate, n,
         return 0
     rate = rate or 1.0
     horizon = start_ms + (n / SAMPLE_RATE * 1000.0) * rate
+    if gameplay_end_ms is not None:      # stop at gameplay end, not into results
+        horizon = min(horizon, float(gameplay_end_ms))
     seg_len = 4 * 8                            # 4/4: beatsPerBar(4) * 2 * 4 bars
     laid = 0
     for i, (ptime, beat) in enumerate(reds):
@@ -493,7 +499,8 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
                          gain: float = DEFAULT_HIT_GAIN,
                          nightcore: bool = False,
                          nc_mod: bool = False,
-                         hitsounds_on: bool = True) -> Path | None:
+                         hitsounds_on: bool = True,
+                         gameplay_end_ms: float | None = None) -> Path | None:
     """Mix every CAUGHT object's resolved samples at its catch time into one
     stereo WAV on the VIDEO time axis (wall = (t_map - start_ms)/rate — the
     same compression the video applies; sample PCM keeps natural pitch,
@@ -586,7 +593,8 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
     # overlay plays instead — osu! never plays both on one render).
     nc_beats = 0
     if nightcore and not nc_mod:
-        nc_beats = _layer_metronome_catch(track, bm, bank, start_ms, rate, n)
+        nc_beats = _layer_metronome_catch(track, bm, bank, start_ms, rate, n,
+                                          gameplay_end_ms=gameplay_end_ms)
 
     # ModNightcore beat overlay — AUTOMATIC when the NC mod is active,
     # independent of the `nightcore` metronome toggle above (both may lay).
@@ -594,7 +602,8 @@ def build_hitsound_track(objs, caught, bm, *, beatmap_dir: Path | None,
     if nc_mod:
         play_hats = (int(round(getattr(bm, "tick_rate", 1.0) or 1.0)) % 2 == 0)
         nc_mod_beats = _layer_nightcore_mod_catch(track, bm, bank, start_ms,
-                                                  rate, n, play_hats=play_hats)
+                                                  rate, n, play_hats=play_hats,
+                                                  gameplay_end_ms=gameplay_end_ms)
 
     if placed == 0 and nc_beats == 0 and nc_mod_beats == 0:
         return None

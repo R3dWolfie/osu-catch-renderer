@@ -511,7 +511,9 @@ def render_core(
                 synth_style=synth_style_for(has_custom),
                 nightcore=getattr(cfg, "nightcore_hitsounds", False),
                 nc_mod=is_nc,
-                hitsounds_on=getattr(cfg, "hitsounds", True))
+                hitsounds_on=getattr(cfg, "hitsounds", True),
+                # beat overlays stop at gameplay end, not into results (taiko ac73af2)
+                gameplay_end_ms=float(gameplay_end_ms))
         except Exception as e:  # noqa: BLE001 — hitsounds never break a render
             print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
             hits_wav = None
