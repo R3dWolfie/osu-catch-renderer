@@ -39,6 +39,23 @@ class _CatchHud:
         return max(0.0, min(1.0, cp.accuracy))
 
 
+def _img_from_rgb(rgb: "np.ndarray") -> Image.Image:
+    """PIL image from an HxWx3 uint8 frame. PERF (output-identical): the GL
+    readback is a bottom-up CONTIGUOUS buffer exposed as a flipud view;
+    Image.fromarray on that view pays a strided numpy tobytes pass AND the
+    raw-decode copy. PIL's raw decoder can do the vertical flip itself
+    (orientation -1) inside its single copy, so hand it the contiguous
+    bottom-up buffer directly. Any other layout falls back to fromarray."""
+    if (rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[2] == 3
+            and rgb.strides[0] < 0):
+        flipped = rgb[::-1]
+        if flipped.flags.c_contiguous:
+            return Image.frombuffer(
+                "RGB", (rgb.shape[1], rgb.shape[0]), flipped,
+                "raw", "RGB", 0, -1)
+    return Image.fromarray(rgb, "RGB")
+
+
 class DanserHud:
     def __init__(self, skin_dir: Path, resolution, meta, beatmap,
                  first_ms: int, last_ms: int, cfg=None, default_skin_dir=None):
@@ -237,7 +254,7 @@ class DanserHud:
         # catch's HUD must look identical to STD's; only platter + fruit
         # differ per mode). Values (score/acc/combo/hp/pp) still come from
         # catch's own sim — only the visual rendering is STD's.
-        img = Image.fromarray(rgb, "RGB")
+        img = _img_from_rgb(rgb)
         # An uploaded skin that ships its own number font drives a skin HUD
         # (score/combo/accuracy from the skin's glyphs); skinless stays Argon.
         if self._use_skin_hud:

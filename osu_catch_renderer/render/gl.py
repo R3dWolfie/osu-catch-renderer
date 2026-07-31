@@ -159,6 +159,7 @@ class SpriteRenderer:
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
     _PBO_RING = 3
+    _HOST_POOL = 8             # see _pbo_host note in read_rgb_async
 
     def read_rgb_async(self) -> "np.ndarray | None":
         """Queue an async readback of the current fbo into a small PBO
@@ -172,6 +173,14 @@ class SpriteRenderer:
             size = self.width * self.height * 3
             self._pbos = [self.ctx.buffer(reserve=size)
                           for _ in range(self._PBO_RING)]
+            # PERF: pooled CPU staging buffers — read_into() replaces
+            # buf.read()'s fresh 6 MB bytes object per frame. The pool is
+            # DEEPER than the PBO ring because popped frames now sit in the
+            # composite stage's bounded queue (depth 3) before being
+            # consumed; pool > ring + composite queue + in-process + 1 keeps
+            # a queued frame from ever being overwritten (strict FIFO).
+            self._pbo_host = [bytearray(size) for _ in range(self._HOST_POOL)]
+            self._host_i = 0
         buf = self._pbos[self._pbo_head % len(self._pbos)]
         self.fbo.read_into(buf, components=3, alignment=1)
         self._pbo_head += 1
@@ -182,10 +191,12 @@ class SpriteRenderer:
     def _pop_pbo(self) -> np.ndarray:
         buf = self._pbos[self._pbo_tail % len(self._pbos)]
         self._pbo_tail += 1
-        data = buf.read()
-        arr = np.frombuffer(data, dtype="u1").reshape(
+        host = self._pbo_host[self._host_i % len(self._pbo_host)]
+        self._host_i += 1
+        buf.read_into(host)
+        arr = np.frombuffer(host, dtype="u1").reshape(
             (self.height, self.width, 3))
-        return np.flipud(arr)  # same orientation contract as read_rgb
+        return arr[::-1]  # same orientation contract as read_rgb (flip view)
 
     def read_drain(self) -> list:
         """Return every frame still in flight, oldest first (map end or
