@@ -60,8 +60,8 @@ _DEFAULT_NC_DIR = Path(__file__).resolve().parent.parent / "assets" / "default_n
 SET_NAMES = {1: "normal", 2: "soft", 3: "drum"}
 ADDITIONS = ((2, "hitwhistle"), (4, "hitfinish"), (8, "hitclap"))
 # global hit gain over per-event volume — the mania v2 DEFAULT_HIT_GAIN
-# (music sits at loudnorm -10 LUFS; hits ride on top at this ceiling).
-DEFAULT_HIT_GAIN = 0.55
+# (music sits at loudnorm -18 LUFS; hits ride on top at this ceiling (2026-07-31: -8 LU rebalance vs music)).
+DEFAULT_HIT_GAIN = 0.22
 VOLUME_FLOOR = 0.08       # stable floors sample volume at 8%
 
 
@@ -370,7 +370,7 @@ class SampleBank:
 
 # --- beat overlay (metronome) -------------------------------------------------
 
-_METRONOME_GAIN = 0.35        # beat-overlay click sits under the caught hits
+_METRONOME_GAIN = 0.14        # beat-overlay click sits under the caught hits
 
 
 def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
@@ -420,7 +420,7 @@ def _layer_metronome_catch(track, bm, bank, start_ms, rate, n) -> int:
 
 # --- ModNightcore beat overlay (NC-mod-gated, distinct from the metronome) -----
 
-_NC_MOD_GAIN = 0.5        # nightcore-kick/clap/hat/finish drums
+_NC_MOD_GAIN = 0.20        # nightcore-kick/clap/hat/finish drums
 
 
 def _layer_nightcore_mod_catch(track, bm, bank, start_ms, rate, n,
