@@ -50,7 +50,10 @@ class _FrameWriter:
     one digest at close — bit-identical output proof across perf changes
     (same env/mechanism as the std renderer)."""
 
-    _QUEUE_FRAMES = 4
+    # 12 frames of elasticity (~75 MB at 1080p): ffmpeg's ingest is fast on
+    # average but stalls in bursts (loudnorm's 3 s blocks + muxer interleave);
+    # a 4-deep queue let every stall block the render thread.
+    _QUEUE_FRAMES = 12
 
     def __init__(self, proc):
         self._stdin = proc.stdin
@@ -72,7 +75,15 @@ class _FrameWriter:
             if self._werr is not None:
                 continue          # drain (never write after an error)
             try:
-                data = frame.tobytes()
+                # PERF: a C-contiguous frame is written straight from its
+                # buffer (memoryview) — no 6 MB tobytes copy per frame, and
+                # no GIL-held memcpy stealing time from the render thread.
+                # Non-contiguous frames (flipud views) keep the copy path.
+                # Bytes on the pipe are identical either way.
+                if isinstance(frame, np.ndarray) and frame.flags.c_contiguous:
+                    data = memoryview(frame).cast("B")
+                else:
+                    data = frame.tobytes()
                 if self._hash is not None:
                     self._hash.update(data)
                     self._hash_frames += 1
@@ -94,6 +105,96 @@ class _FrameWriter:
         if self._hash is not None:
             print(f"frame-stream-hash: {self._hash.hexdigest()} "
                   f"({self._hash_frames} frames)", file=sys.stderr, flush=True)
+
+
+class _CompositeWorker:
+    """HUD/results compositing pipeline stage (render thread -> here ->
+    _FrameWriter). The render thread hands work items over a small bounded
+    queue; this thread runs the flashlight pass, hud.overlay and the outro's
+    draw_results in STRICT FIFO ORDER and pushes finished frames to the
+    writer. hud.overlay / draw_results are deterministic functions of the
+    scene snapshot + their own sequential state, and that state now lives on
+    THIS thread only, so frame content and order are byte-identical to the
+    old inline calls — the compositing simply overlaps the GL draw/readback
+    of later frames (PIL/numpy release the GIL for their big ops).
+
+    Queue depth bounds raw-readback lifetime: SpriteRenderer's host staging
+    pool must exceed queue + in-process + 1 so a queued raw frame is never
+    overwritten before this thread consumes it (see gl._HOST_POOL).
+
+    Items: ("g", raw, scene)  gameplay frame -> flashlight + HUD -> writer
+           ("r", fn, None)    outro frame    -> fn(last_gameplay) -> writer
+           ("f", None, None)  frozen final gameplay frame re-push."""
+
+    _QUEUE = 3
+
+    def __init__(self, hud, writer, fl, perf=None):
+        self._hud = hud
+        self._writer = writer
+        self._fl = fl
+        self._perf = perf
+        self.last_gameplay = None
+        self._q: "queue.Queue" = queue.Queue(maxsize=self._QUEUE)
+        self._werr: BaseException | None = None
+        self._thread = threading.Thread(target=self._run,
+                                        name="hud-composite", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        pc = time.perf_counter
+        perf = self._perf
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            if self._werr is not None:
+                continue                      # drain (never emit after error)
+            kind, a, b = item
+            try:
+                if kind == "g":               # gameplay: flashlight + HUD
+                    raw, scene = a, b
+                    if self._fl is not None:
+                        raw = self._fl.apply(raw, scene)
+                    t0 = pc() if perf is not None else 0.0
+                    out = self._hud.overlay(raw, scene)
+                    if perf is not None:
+                        perf["hud"] += pc() - t0
+                    self.last_gameplay = out
+                    self._writer.push(out)
+                elif kind == "r":             # outro: results screen
+                    if self.last_gameplay is None:
+                        raise CatchRenderError(
+                            "outro before any gameplay frame")
+                    t0 = pc() if perf is not None else 0.0
+                    out = a(self.last_gameplay)
+                    if perf is not None:
+                        perf["results"] += pc() - t0
+                    self._writer.push(out)
+                else:                         # "f": frozen gameplay frame
+                    if self.last_gameplay is None:
+                        raise CatchRenderError(
+                            "outro before any gameplay frame")
+                    self._writer.push(self.last_gameplay)
+            except BaseException as e:  # noqa: BLE001 — surfaced on push()
+                self._werr = e
+
+    def push(self, item) -> None:
+        """Queue one work item; re-raises this thread's error so a failed
+        HUD/results pass (or a dead ffmpeg below it) fails the render loudly
+        exactly like the old inline call did."""
+        if self._werr is not None:
+            raise self._werr
+        self._q.put(item)
+
+    def close(self) -> None:
+        """Drain + join. Re-raises a pending worker error (except
+        BrokenPipeError, which the caller surfaces via ffmpeg's exit code,
+        matching the old inline flow)."""
+        self._q.put(None)
+        self._thread.join()
+        if self._werr is not None and not isinstance(self._werr,
+                                                     BrokenPipeError):
+            raise self._werr
 
 
 def render_catch(
@@ -438,7 +539,6 @@ def render_core(
             import sys
             print(f"[catch-renderer] leaderboard skipped: {e}", file=sys.stderr)
             baked_board = None
-    last_gameplay = None
     # Async pipeline (ported from the std renderer's proven design):
     #   * GPU readback goes through a 3-deep PBO ring (read_rgb_async returns
     #     None while the ring fills; frames pop out ~2 frames late, in strict
@@ -447,10 +547,17 @@ def render_core(
     #     ring: the scene snapshot is queued alongside, and hud.overlay is a
     #     deterministic function of it — called once per frame, in frame
     #     order, exactly as the synchronous path did.
-    #   * The ffmpeg pipe write (tobytes + stdin.write) happens on a writer
-    #     thread behind a small bounded queue (_FrameWriter).
+    #   * Flashlight + HUD compositing + the outro's results screen run on a
+    #     dedicated composite thread in strict FIFO order (_CompositeWorker),
+    #     overlapping the GL draw/readback of later frames.
+    #   * The ffmpeg pipe write happens on a writer thread behind a small
+    #     bounded queue (_FrameWriter), fed only by the composite thread.
     # Frame count, order and bytes are identical to the synchronous path.
     _t_render0 = time.monotonic()
+    _PERF = os.environ.get("R3D_CATCH_PERF")
+    _pt = {"scene": 0.0, "draw": 0.0, "read": 0.0, "hud": 0.0,
+           "results": 0.0, "enq": 0.0}
+    _pc = time.perf_counter
     writer = _FrameWriter(proc)
     pending = deque()          # scene snapshots awaiting their pixels
 
@@ -465,25 +572,30 @@ def render_core(
     if has_flashlight(getattr(meta, "mods", 0)) and not overlay_extra:
         fl = CatchFlashlight(break_env=getattr(sim, "_break_env", None))
 
+    # compositing pipeline stage: flashlight + HUD + results run on their own
+    # thread (strict FIFO), overlapping the GL draw/readback of later frames.
+    comp = _CompositeWorker(hud, writer, fl, perf=_pt if _PERF else None)
+
     def _emit_gameplay(raw):
-        nonlocal last_gameplay
         scene = pending.popleft()
-        if fl is not None:
-            raw = fl.apply(raw, scene)
-        out = hud.overlay(raw, scene)
-        last_gameplay = out
-        writer.push(out)
+        _t0 = _pc()
+        comp.push(("g", raw, scene))
+        _pt["enq"] += _pc() - _t0
 
     try:
         try:
             for i in range(n_frames):
                 if i < gameplay_frames:
                     t = int(start_ms + i * map_step)
+                    _t0 = _pc()
                     scene = sim.build_scene(t)
+                    _t1 = _pc(); _pt["scene"] += _t1 - _t0
                     renderer.begin()
                     renderer.draw(scene.sprites)
+                    _t2 = _pc(); _pt["draw"] += _t2 - _t1
                     pending.append(scene)
                     raw = renderer.read_rgb_async()
+                    _pt["read"] += _pc() - _t2
                     if raw is not None:
                         _emit_gameplay(raw)
                 else:
@@ -498,21 +610,28 @@ def render_core(
                     # input — they fromarray-copy — and the writer only reads,
                     # so the frozen frame can be pushed by reference. PERF.)
                     t = int(gameplay_end_ms + (i - gameplay_frames) * frame_ms)
-                    rgb = last_gameplay if last_gameplay is not None else \
-                        renderer.read_rgb()
                     if cfg.show_results and t >= results_start_ms:
                         op = min(1.0, (t - results_start_ms) / FADE_MS)
+                        age = float(t - results_start_ms)
+
                         # age_ms drives the lazer results screen's two-stage
-                        # animation (arc sweep / grade punch / score roll / card
-                        # slide-in, then the stage-2 stats panels unfolding from
-                        # the right); osu_path lets it compute stars + pp (rosu);
-                        # sim feeds the stage-2 COMBO panel its checkpoint series.
-                        rgb = draw_results(rgb, meta, bm, op, board=baked_board,
-                                           age_ms=float(t - results_start_ms),
-                                           osu_path=osu_path, sim=sim,
-                                           pp_override=cfg.pp_override,
-                                           sr_override=cfg.sr_override)
-                    writer.push(rgb)
+                        # animation (arc sweep / grade punch / score roll /
+                        # card slide-in, then the stage-2 stats panels
+                        # unfolding from the right); osu_path lets it compute
+                        # stars + pp (rosu); sim feeds the stage-2 COMBO panel
+                        # its checkpoint series. Runs on the composite thread
+                        # over ITS frozen final gameplay frame (identical to
+                        # the old inline call: same args, same FIFO position).
+                        def _results_frame(lg, op=op, age=age):
+                            return draw_results(
+                                lg, meta, bm, op, board=baked_board,
+                                age_ms=age, osu_path=osu_path, sim=sim,
+                                pp_override=cfg.pp_override,
+                                sr_override=cfg.sr_override)
+
+                        comp.push(("r", _results_frame, None))
+                    else:
+                        comp.push(("f", None, None))
                 if progress_callback and i % cfg.fps == 0:
                     progress_callback(int(i / n_frames * 100))
             # map end with no outro configured: flush the ring tail.
@@ -521,6 +640,13 @@ def render_core(
         except BrokenPipeError:
             pass               # ffmpeg died — surfaced via ret below
     finally:
+        # composite errors are re-raised AFTER the ffmpeg/GL cleanup below —
+        # raising here would leak the ffmpeg child + GL context.
+        _comp_err = None
+        try:
+            comp.close()
+        except BaseException as e:  # noqa: BLE001 — deferred, never swallowed
+            _comp_err = e
         writer.close()
         if proc.stdin:
             try:
@@ -538,9 +664,15 @@ def render_core(
                 pass
         import sys as _rsys
         _wall = time.monotonic() - _t_render0
+        if _PERF:
+            import sys as _psys
+            print("PERF " + " ".join(f"{k}={v:.2f}s" for k, v in _pt.items()),
+                  file=_psys.stderr, flush=True)
         print(f"done: {n_frames} frames in {_wall:.1f}s "
               f"({(n_frames / _wall) if _wall else 0.0:.1f} fps) ret={ret}",
               file=_rsys.stderr, flush=True)
+        if _comp_err is not None:
+            raise _comp_err
 
     if ret != 0:
         tail = ""
@@ -669,6 +801,15 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         prefix="catch_ffmpeg_", suffix=".log", delete=False, mode="w+",
     )
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errf, bufsize=0)
+    # PERF: grow the stdin pipe from the 64 KB default (a 6 MB 1080p frame =
+    # ~95 kernel wakeups) up to pipe-max-size (1 MB unprivileged). Fewer
+    # syscalls + smoother handoff; bytes on the pipe are unchanged.
+    try:
+        import fcntl
+        F_SETPIPE_SZ = 1031
+        fcntl.fcntl(proc.stdin.fileno(), F_SETPIPE_SZ, 1 << 20)
+    except OSError:
+        pass
     proc._catch_errlog = errf.name  # type: ignore[attr-defined]
     return proc
 
