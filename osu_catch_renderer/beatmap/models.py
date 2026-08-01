@@ -216,6 +216,12 @@ class Sprite:
     color: tuple[float, float, float, float] = (1, 1, 1, 1)
     rotation: float = 0.0
     additive: bool = False           # additive blend (glow / catch explosion)
+    # texture UV offset/scale — the storyboard mirrors flipped sprites via a UV
+    # flip instead of a negative GL size. Identity defaults ((0,0)/(1,1)) make
+    # `in_uv * uv_scale + uv_off == in_uv`, so every existing (gameplay/HUD)
+    # sprite is sampled bit-identically to before.
+    uv_off: tuple[float, float] = (0.0, 0.0)
+    uv_scale: tuple[float, float] = (1.0, 1.0)
 
 
 @dataclass

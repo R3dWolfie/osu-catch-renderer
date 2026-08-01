@@ -24,6 +24,8 @@ uniform vec2 u_screen;   // (w, h) in px
 uniform vec2 u_center;   // sprite center in px (origin top-left)
 uniform vec2 u_size;     // sprite w,h in px
 uniform float u_rot;     // radians
+uniform vec2 u_uv_off;   // texture UV offset (storyboard flip mirroring)
+uniform vec2 u_uv_scale; // texture UV scale  (default (1,1); -1 mirrors an axis)
 out vec2 v_uv;
 void main() {
     vec2 p = in_pos * u_size;
@@ -34,7 +36,9 @@ void main() {
     vec2 ndc = vec2(px.x / u_screen.x * 2.0 - 1.0,
                     1.0 - px.y / u_screen.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
-    v_uv = in_uv;
+    // identity default ((0,0)/(1,1)) == `in_uv`, so non-storyboard sprites are
+    // sampled bit-identically; a storyboard flip passes off=1,scale=-1 per axis.
+    v_uv = in_uv * u_uv_scale + u_uv_off;
 }
 """
 
@@ -92,6 +96,17 @@ class SpriteRenderer:
         self._u_center = self.prog["u_center"]
         self._u_size = self.prog["u_size"]
         self._u_rot = self.prog["u_rot"]
+        # UV flip uniforms (storyboard mirroring). Bound to identity so every
+        # gameplay/HUD sprite (uv_off=(0,0), uv_scale=(1,1)) samples exactly
+        # `in_uv` — bit-identical to before. _draw_one only re-binds them when a
+        # sprite's uv differs from what's currently bound, so a flag-off render
+        # never touches them after this init (zero per-sprite overhead too).
+        self._u_uv_off = self.prog["u_uv_off"]
+        self._u_uv_scale = self.prog["u_uv_scale"]
+        self._u_uv_off.value = (0.0, 0.0)
+        self._u_uv_scale.value = (1.0, 1.0)
+        self._cur_uv_off = (0.0, 0.0)
+        self._cur_uv_scale = (1.0, 1.0)
 
         rb = self.ctx.renderbuffer((width, height))
         self.fbo = self.ctx.framebuffer(color_attachments=[rb])
@@ -106,23 +121,46 @@ class SpriteRenderer:
 
     # --- texture management ---------------------------------------------------
 
-    def upload_texture(self, key: str, rgba: np.ndarray) -> None:
-        """rgba: HxWx4 uint8 array (top-left origin)."""
+    def upload_texture(self, key: str, rgba: np.ndarray,
+                       clamp: bool = False, mipmaps: bool = True) -> None:
+        """rgba: HxWx4 uint8 array (top-left origin). clamp=True sets
+        clamp-to-edge wrapping (the storyboard samples with a flipped UV that
+        can graze the edge texel; repeat wrap would wrap the far edge in).
+        mipmaps default True — existing callers pass neither and are unchanged
+        (mipmapped LINEAR, repeat wrap, exactly as before)."""
         if rgba.dtype != np.uint8:
             rgba = rgba.astype("u1")
         if rgba.shape[2] == 3:
             a = np.full(rgba.shape[:2] + (1,), 255, dtype="u1")
             rgba = np.concatenate([rgba, a], axis=2)
-        self._textures[key] = self._make_texture_rgba(rgba)
+        tex = self._make_texture_rgba(rgba, mipmaps=mipmaps)
+        if clamp:
+            tex.repeat_x = False
+            tex.repeat_y = False
+        self._textures[key] = tex
 
     def has_texture(self, key: str) -> bool:
         return key in self._textures
 
-    def _make_texture_rgba(self, rgba: np.ndarray) -> "moderngl.Texture":
+    def release_texture(self, key: str) -> None:
+        """Free a cached texture by key (storyboard LRU eviction). No-op if
+        the key is absent."""
+        tex = self._textures.pop(key, None)
+        if tex is not None:
+            try:
+                tex.release()
+            except Exception:  # noqa: BLE001 - context may be tearing down
+                pass
+
+    def _make_texture_rgba(self, rgba: np.ndarray,
+                           mipmaps: bool = True) -> "moderngl.Texture":
         h, w = rgba.shape[:2]
         tex = self.ctx.texture((w, h), 4, rgba.tobytes())
-        tex.build_mipmaps()
-        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        if mipmaps:
+            tex.build_mipmaps()
+            tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        else:
+            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         return tex
 
     # --- drawing --------------------------------------------------------------
@@ -156,6 +194,15 @@ class SpriteRenderer:
         self._u_center.value = (sp.x, sp.y)
         self._u_size.value = (sp.w, sp.h)
         self._u_rot.value = sp.rotation
+        # UV flip (storyboard mirroring). Every gameplay/HUD sprite keeps the
+        # identity default, so these never re-bind on a flag-off render and the
+        # sampled UV stays exactly `in_uv` — byte-identical to before.
+        if sp.uv_off != self._cur_uv_off:
+            self._u_uv_off.value = sp.uv_off
+            self._cur_uv_off = sp.uv_off
+        if sp.uv_scale != self._cur_uv_scale:
+            self._u_uv_scale.value = sp.uv_scale
+            self._cur_uv_scale = sp.uv_scale
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
     _PBO_RING = 3
