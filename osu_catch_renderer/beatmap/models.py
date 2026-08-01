@@ -203,6 +203,11 @@ class RenderConfig:
     show_leaderboard: bool = True
     leaderboard_source: str = "r3d"      # r3d | osu
     leaderboard_json: Path | None = None
+    # Storyboard (in-house engine): parse the .osu/.osb and render the map's
+    # storyboard behind the playfield (+ Overlay layer over it). DEFAULT OFF so
+    # every live catch render is byte-identical until this is deliberately
+    # flipped on. Mirrors the std/taiko renderers' --storyboard flag.
+    load_storyboard: bool = False
 
 
 @dataclass

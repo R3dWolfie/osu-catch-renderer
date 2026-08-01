@@ -115,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
                          "osu! pfp). Absent -> the procedural username chip. "
                          "The old render-DB Discord lookup is gone, so the "
                          "card can never show the owner's pfp.")
+    ap.add_argument("--storyboard", action=BA, default=False,
+                    help="parse the .osu/.osb and render the map's storyboard "
+                         "(in-house engine, parity with std/taiko). DEFAULT "
+                         "OFF; when off the render is byte-identical to today's.")
     args = ap.parse_args(argv)
 
     # --player-skin count must align to the player list [primary, *overlay-osr].
@@ -176,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         show_leaderboard=args.leaderboard,
         leaderboard_source=args.leaderboard_source,
         leaderboard_json=args.leaderboard_json,
+        load_storyboard=args.storyboard,
     )
     if args.results_seconds is not None:
         cfg.results_ms = int(args.results_seconds * 1000)
