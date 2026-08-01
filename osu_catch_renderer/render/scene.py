@@ -735,14 +735,23 @@ class CatchSim:
 
     def build_scene(self, t_ms: int) -> SceneState:
         s = SceneState(time_ms=t_ms)
+        # preset bg dim via the DimEnvelope (intro/game/breaks levels with std's
+        # smoothstep glides): % dim (higher=darker) → brightness. Computed
+        # unconditionally so the storyboard (DimmableStoryboard) can share the
+        # SAME dim even when there is no beatmap bg image; when there IS a bg the
+        # value is the exact one the bg sprite has always used, so nothing
+        # changes for existing renders.
+        d = max(0.0, 1.0 - self._dim_env.level(t_ms))
+        s.sb_brightness = d
         # dimmed beatmap background (drawn first, behind everything)
         if self.has_bg:
-            # preset bg dim via the DimEnvelope (intro/game/breaks levels with
-            # std's smoothstep glides): % dim (higher=darker) → brightness
-            d = max(0.0, 1.0 - self._dim_env.level(t_ms))
             s.sprites.append(Sprite(self.screen_w / 2, self.screen_h / 2,
                                     self.screen_w, self.screen_h,
                                     texture_key="bg", color=(d, d, d, 1.0)))
+        # Split point for the storyboard underlay: it draws right after the
+        # beatmap background image (index 1 when present, else 0 = behind the
+        # playfield), with the playfield drawn on top.
+        s.bg_split = len(s.sprites)
 
         # falling objects. Caught objects vanish at the catch line; MISSED ones
         # keep FALLING THROUGH the catcher for 250 ms while fading out and

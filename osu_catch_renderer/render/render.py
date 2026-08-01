@@ -241,6 +241,16 @@ def render_catch(
                        catcher_skins=catcher_skins)
 
 
+def _build_storyboard(cfg, renderer, osu_path, w, h):
+    """Construct the storyboard renderer when --storyboard is on, else None.
+
+    Phase 4 placeholder: returns None unconditionally so the frame loop takes
+    its exact single-draw path (live renders byte-identical). Phase 5 replaces
+    the body with the parse -> engine -> renderer construction and gates it on
+    cfg.load_storyboard."""
+    return None
+
+
 def render_core(
     bm,
     frames,
@@ -478,6 +488,11 @@ def render_core(
     if bg is not None:
         renderer.upload_texture("bg", _bg_cover(bg, w, h, cfg.bg_blur))
 
+    # Storyboard renderer (phase 4/5): constructed only when --storyboard is on
+    # (see _build_storyboard). While None, the frame loop takes the exact
+    # single-draw path it always has, so live renders are byte-identical.
+    storyboard = _build_storyboard(cfg, renderer, osu_path, w, h)
+
     total_dur_s = n_frames / cfg.fps
     # Caught-object hitsounds (stable behaviour; default ON): pre-mix every
     # caught object's samples into a wall-time WAV; the encode amixes it on
@@ -594,7 +609,25 @@ def render_core(
                     scene = sim.build_scene(t)
                     _t1 = _pc(); _pt["scene"] += _t1 - _t0
                     renderer.begin()
-                    renderer.draw(scene.sprites)
+                    if storyboard is None:
+                        # exact single-draw path (byte-identical to pre-SB)
+                        renderer.draw(scene.sprites)
+                    else:
+                        # interleave the two storyboard z-slices around the
+                        # playfield: bg image -> SB underlay (Background/Fail/
+                        # Pass/Foreground) -> playfield sprites -> SB overlay
+                        # (Overlay layer). catch's flashlight/HUD/results are
+                        # CPU-composited after readback, so the whole GL pass
+                        # sits under them — the SB Overlay lands over gameplay,
+                        # under the HUD, as in lazer. Both slices share the bg
+                        # dim (scene.sb_brightness).
+                        n = scene.bg_split
+                        b = scene.sb_brightness
+                        if n:
+                            renderer.draw(scene.sprites[:n])
+                        storyboard.draw_underlay(t, b)
+                        renderer.draw(scene.sprites[n:])
+                        storyboard.draw_overlay(t, b)
                     _t2 = _pc(); _pt["draw"] += _t2 - _t1
                     pending.append(scene)
                     raw = renderer.read_rgb_async()

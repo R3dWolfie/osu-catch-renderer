@@ -252,6 +252,13 @@ class SceneState:
     # dx derivation (which aliases rapid taps; see scene._build_inputs).
     keys_held: tuple | None = None
     key_counts: tuple | None = None
+    # Storyboard compositing hooks (only read when --storyboard is on):
+    # `bg_split` = index in `sprites` where the beatmap background ends and the
+    # playfield begins, so the SB underlay can be drawn between them; the
+    # playfield draws on top. `sb_brightness` = 1 - background dim envelope, so
+    # the storyboard is tinted by the SAME dim as the bg (DimmableStoryboard).
+    bg_split: int = 0
+    sb_brightness: float = 1.0
 
 
 # osu!catch geometry constants -------------------------------------------------
