@@ -177,6 +177,11 @@ class RenderConfig:
     # overrides); resolution then starts at the skin chain. Mirrors the
     # site preset "Use the beatmap's hitsounds".
     beatmap_hitsounds: bool = True
+    # Combo colours source: "beatmap" (default) keeps the certified precedence
+    # in scene._combo_tint; "skin" makes the user's chosen skin win outright
+    # (its Combo1..N, else the default/stock skin combos), ignoring the map's
+    # [Colours]. Site preset "Combo colors" (Beatmap / Skin).
+    combo_colors: str = "beatmap"
     # Beat overlay (metronome): clap each beat + finish each downbeat across the
     # whole song, mixed into the hitsound track. Off by default; the site's
     # "Beat overlay (metronome)" toggle. Mod-independent (a general metronome).

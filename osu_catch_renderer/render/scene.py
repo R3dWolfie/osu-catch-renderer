@@ -997,6 +997,15 @@ class CatchSim:
         # made them READ as skin-white). Skinless path order is unchanged
         # (map → lazer palette): certified argon output stays bit-identical.
         sk = self.skin
+        # "Combo colors" setting (--combo-colors): "skin" makes the user's chosen
+        # skin win OUTRIGHT (its own Combo1..N, else the default/stock skin
+        # combos), ignoring the map's [Colours] entirely — this is what the site's
+        # "Skin" choice means. "beatmap" (default) keeps the certified 2026-07-22
+        # precedence below, byte-identical to before.
+        if getattr(self.cfg, "combo_colors", "beatmap") == "skin":
+            if sk is not None:
+                return sk.combo_color(combo_index)
+            return self._LAZER_COMBO[combo_index % len(self._LAZER_COMBO)]
         if sk is not None and getattr(sk, "combo_colors_custom", False):
             return sk.combo_color(combo_index)
         cc = self.bm.combo_colors

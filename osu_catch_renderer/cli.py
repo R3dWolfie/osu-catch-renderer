@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--encoder-device", default=None, help="e.g. /dev/dri/renderD128")
     ap.add_argument("--skin", type=Path, default=None, help="extracted skin dir (e.g. Night05)")
     ap.add_argument("--default-skin", type=Path, default=None, help="fallback skin dir")
+    ap.add_argument("--combo-colors", choices=("beatmap", "skin"), default="beatmap",
+                    help="combo-colour source: beatmap [Colours] (default) or the skin's")
     ap.add_argument("--overlay-osr", action="append", type=Path, default=[],
                     help="extra replay(s) for a versus OVERLAY (repeatable)")
     ap.add_argument("--player-skin", "--catcher-skin", dest="player_skin",
@@ -166,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         not in ("off", "none", "0", "false", "no"),
         hitsound_volume=max(0, min(100, args.hitsound_volume)),
         beatmap_hitsounds=args.beatmap_hitsounds,
+        combo_colors=args.combo_colors,
         nightcore_hitsounds=args.nightcore_hitsounds,
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=args.bg_dim_game,
