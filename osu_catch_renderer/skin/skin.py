@@ -8,10 +8,13 @@ and drawn as-is. @2x variants are preferred when present.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+log = logging.getLogger(__name__)
 
 # fruit shape cycles by combo index, matching lazer's VisualRepresentation
 FRUIT_SHAPES = ["fruit-pear", "fruit-grapes", "fruit-apple", "fruit-orange"]
@@ -158,6 +161,8 @@ class CatchSkin:
                 if p is None:
                     continue
                 tex = _rgba(p)
+                if tex is None:
+                    continue
                 if key in self._BOOST:
                     tex = _brighten(tex, 1.9)
                 self.textures[key] = tex
@@ -179,6 +184,8 @@ class CatchSkin:
                 p = d / f"{stem}.png"
                 if p.is_file():
                     tex = _rgba(p)
+                    if tex is None:
+                        continue
                     if "@2x" in p.name:   # store at LOGICAL size for sizing
                         im = Image.fromarray(tex).resize(
                             (max(1, tex.shape[1] // 2),
@@ -257,8 +264,14 @@ class CatchSkin:
         return h / w if w else default
 
 
-def _rgba(path: Path) -> np.ndarray:
-    return np.array(Image.open(path).convert("RGBA"))
+def _rgba(path: Path) -> "np.ndarray | None":
+    """Decode a skin PNG to HxWx4 uint8, or None on failure so the caller
+    skips the key (same as a missing file -> bundled/default fallback)."""
+    try:
+        return np.array(Image.open(path).convert("RGBA"))
+    except Exception as e:  # noqa: BLE001 -- corrupt user-skin PNG must not crash the render
+        log.warning("skin: failed to load %s: %s", path, e)
+        return None
 
 
 def _brighten(rgba: np.ndarray, factor: float) -> np.ndarray:

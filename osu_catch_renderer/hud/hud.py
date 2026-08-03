@@ -7,10 +7,13 @@ PIL. Everything composites on the CPU after GL readback.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+log = logging.getLogger(__name__)
 
 # osu mod bit -> selection-mod-<name>. Nightcore (512) supersedes DT; Perfect (16384) supersedes SD.
 _MODS = [
@@ -1577,7 +1580,11 @@ class DanserHud:
         p = self._resolve(base, default_ok=default_ok)
         if p is None:
             return None
-        im = Image.open(p).convert("RGBA")
+        try:
+            im = Image.open(p).convert("RGBA")
+        except Exception as e:  # noqa: BLE001 -- corrupt user-skin PNG must not crash the render
+            log.warning("hud: failed to load %s: %s", p, e)
+            return None
         if "@2x" in p.name:
             im = im.resize((max(1, im.width // 2), max(1, im.height // 2)),
                            Image.LANCZOS)
@@ -1588,7 +1595,11 @@ class DanserHud:
         p = self._resolve(base, default_ok=default_ok)
         if p is None:
             return None
-        im = Image.open(p).convert("RGBA")
+        try:
+            im = Image.open(p).convert("RGBA")
+        except Exception as e:  # noqa: BLE001 -- corrupt user-skin PNG must not crash the render
+            log.warning("hud: failed to load %s: %s", p, e)
+            return None
         return self._scale_h(im, target_h)
 
     @staticmethod
