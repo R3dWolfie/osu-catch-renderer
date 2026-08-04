@@ -38,3 +38,6 @@ test/1220325/
 *.osr
 *.mp3
 __pycache__/
+
+# R3D logo — license-clean own IP; keep it in-repo so clones do not fall back to the placeholder tile
+!osu_catch_renderer/assets/logo.png
