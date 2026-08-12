@@ -244,6 +244,22 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
                     break
             except (TypeError, ValueError, AttributeError):
                 continue
+        # Lazer replays carry NO life-bar graph, so the scan above finds
+        # nothing even on a genuine fail. Fall back to the last replay-frame
+        # time: a failed/quit replay's frames STOP at the death, so that
+        # timestamp is the truncation point. A full clear keeps moving to
+        # catch the last object, so its last frame lands at ~map end and
+        # render.py's `death_ms < last_obj - 200` guard makes this a no-op
+        # there — only genuinely-short (fail/quit) replays truncate.
+        if death_ms is None:
+            _t = 0
+            for f in (getattr(r, "replay_data", None) or []):
+                _dt = getattr(f, "time_delta", 0)
+                if _dt is None or _dt < 0:   # -12345 end marker / seed frame
+                    continue
+                _t += _dt
+            if _t > 0:
+                death_ms = _t
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
