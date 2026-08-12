@@ -1167,7 +1167,10 @@ class CatchSim:
     # see the hyper echo in _skinned_object (was ×1.32, an invented bump).
     _SKIN_FRUIT = 1.05
     _SKIN_DROPLET = 0.52
-    _SKIN_TINY = 0.416
+    # tiny droplet = 0.5x large droplet (osu!lazer DrawableTinyDroplet
+    # halves ScaleContainer.Scale). Was 0.8x (0.416) which read as same size
+    # as big ticks — Red approved lazer-accurate 0.5x 2026-08-08.
+    _SKIN_TINY = 0.26
     _SKIN_BANANA = 1.05
 
     def _skinned_object(self, obj, x, y, t_ms) -> list[Sprite]:
