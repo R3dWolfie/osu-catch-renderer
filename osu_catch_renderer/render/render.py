@@ -23,6 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from osu_catch_renderer.skin.assets import build_textures
 from osu_catch_renderer.beatmap.beatmap import parse_beatmap
+from osu_catch_renderer.render.death import (FAIL_FADE_MS, apply_death,
+                                             death_progress)
 from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer.render.gl import SpriteRenderer
 from osu_catch_renderer.render import loudnorm_cache
@@ -126,15 +128,23 @@ class _CompositeWorker:
 
     Items: ("g", raw, scene)  gameplay frame -> flashlight + HUD -> writer
            ("r", fn, None)    outro frame    -> fn(last_gameplay) -> writer
-           ("f", None, None)  frozen final gameplay frame re-push."""
+           ("f", None, None)  frozen final gameplay frame re-push.
+
+    On a FAILED play (``death_ms`` set) a death shade is applied to each
+    gameplay frame AFTER the HUD, ramping over the ~1 s (``death_fade_ms`` of
+    map time) ending at ``death_ms`` and held at its floor for the frozen tail.
+    Passing plays pass ``death_ms=None`` and the death path never runs."""
 
     _QUEUE = 3
 
-    def __init__(self, hud, writer, fl, perf=None):
+    def __init__(self, hud, writer, fl, perf=None, *, death_ms=None,
+                 death_fade_ms=0.0):
         self._hud = hud
         self._writer = writer
         self._fl = fl
         self._perf = perf
+        self._death_ms = death_ms
+        self._death_fade_ms = float(death_fade_ms)
         self.last_gameplay = None
         self._q: "queue.Queue" = queue.Queue(maxsize=self._QUEUE)
         self._werr: BaseException | None = None
@@ -161,6 +171,16 @@ class _CompositeWorker:
                     out = self._hud.overlay(raw, scene)
                     if perf is not None:
                         perf["hud"] += pc() - t0
+                    # FAIL death beat: on a failed play, ramp a desaturate +
+                    # darken + red-tint shade over the whole composited frame
+                    # (playfield AND HUD) across the final ~1 s ending at
+                    # death, holding the floor for the frozen tail. Gated on
+                    # death_ms, so passing renders never touch this.
+                    if self._death_ms is not None:
+                        p = death_progress(getattr(scene, "time_ms", 0),
+                                           self._death_ms, self._death_fade_ms)
+                        if p > 0.0:
+                            out = apply_death(out, p)
                     self.last_gameplay = out
                     self._writer.push(out)
                 elif kind == "r":             # outro: results screen
@@ -622,7 +642,12 @@ def render_core(
 
     # compositing pipeline stage: flashlight + HUD + results run on their own
     # thread (strict FIFO), overlapping the GL draw/readback of later frames.
-    comp = _CompositeWorker(hud, writer, fl, perf=_pt if _PERF else None)
+    # FAIL death beat (catch only): scale the ~1 s ramp by playback rate so a
+    # DT/HT fail still reads ~1 s of VIDEO. Only wired when `failed`.
+    _death_arg = float(death_ms) if failed else None
+    _death_fade = FAIL_FADE_MS * rate if failed else 0.0
+    comp = _CompositeWorker(hud, writer, fl, perf=_pt if _PERF else None,
+                            death_ms=_death_arg, death_fade_ms=_death_fade)
 
     def _emit_gameplay(raw):
         scene = pending.popleft()
