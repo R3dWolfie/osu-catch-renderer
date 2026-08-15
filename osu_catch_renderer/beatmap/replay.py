@@ -237,21 +237,22 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
     death_ms: int | None = None
     NF = 0x1
     if not (int(r.mods) & NF):
-        for e in (getattr(r, "life_bar_graph", None) or []):
+        life_bar = getattr(r, "life_bar_graph", None) or []
+        for e in life_bar:
             try:
                 if float(e.life) <= 0.001:
                     death_ms = int(e.time)
                     break
             except (TypeError, ValueError, AttributeError):
                 continue
-        # Lazer replays carry NO life-bar graph, so the scan above finds
-        # nothing even on a genuine fail. Fall back to the last replay-frame
-        # time: a failed/quit replay's frames STOP at the death, so that
-        # timestamp is the truncation point. A full clear keeps moving to
-        # catch the last object, so its last frame lands at ~map end and
-        # render.py's `death_ms < last_obj - 200` guard makes this a no-op
-        # there — only genuinely-short (fail/quit) replays truncate.
-        if death_ms is None:
+        # Frame-timing fallback ONLY when there is genuinely NO life-bar graph
+        # (lazer). A life-bar graph that EXISTS and never hit 0 PROVES the player
+        # survived — stable input legitimately stops before the last object on
+        # trailing bananas / no-movement sections (convert maps especially), so
+        # treating that as a death fabricates a FALSE FAIL on a clear.
+        # (Bug 2026-08-16: Stark's S on "down" — full life the whole play, frames
+        # stop ~2s before the ending doubles, so the fallback invented a death.)
+        if death_ms is None and not life_bar:
             _t = 0
             for f in (getattr(r, "replay_data", None) or []):
                 _dt = getattr(f, "time_delta", 0)
