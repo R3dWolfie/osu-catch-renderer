@@ -563,10 +563,54 @@ class CatchSim:
                 self.final_counts = (m.count_300, m.count_100, m.count_50,
                                      m.count_katu, m.count_miss)
                 self.final_accuracy = self.real_accuracy
-                # NOTE: no acc_offset — the geometric sim is now accurate (head-Y
-                # slider fix + LegacyLastTickOffset), so the running accuracy comes
-                # straight from the sim. final_counts/accuracy above are the
-                # replay's authoritative numbers, used only for the results screen.
+                # --- running-accuracy reconcile to the .osr header ------------
+                # The per-type CAUGHT counts were already reconciled to the
+                # header (pass-1 _reconcile). But the geometric sim can PARSE
+                # more objects of a type than the header accounts for — most
+                # often TINY DROPLETS, whose bit-exact RNG spacing we can't
+                # reproduce (Stark's SS: 778 parsed tiny vs 724 in the header).
+                # Reconcile caps caught at the header count, so the surplus
+                # (778-724 = 54) land as PHANTOM misses that never happened in
+                # the real play — dragging the running/checkpoint accuracy
+                # below the header (2286/2340 = 97.7%) even on a genuine SS,
+                # so the HUD showed "SS · 97%".
+                #
+                # The header is authoritative (osu! itself recorded it), so the
+                # displayed accuracy must reconcile to it. Every checkpoint's
+                # running miss total is discounted by the phantom share (spread
+                # proportionally across the accumulated misses, since we can't
+                # know each phantom's exact timing), so the running acc
+                # converges to — and ENDS EXACTLY at — the header accuracy.
+                #
+                #   phantom = sim's final judged-miss total - header misses
+                #   at checkpoint i:  denom_i = caught_i + miss_i
+                #                                 - phantom*(miss_i / miss_final)
+                #                     acc_i   = caught_i / denom_i
+                #
+                # miss_final == header misses => phantom == 0 => IDENTITY: an
+                # honest sub-SS play (sim already matches the header) is left
+                # untouched and still shows its true sub-SS acc. Only the
+                # phantom surplus is discounted, and only ever downward in
+                # count, so the >20%-desync guard (pass 1) still fails a truly
+                # mismatched replay before we ever get here.
+                header_miss = m.count_katu + m.count_miss
+                cps = self._checkpoints
+                if cps:
+                    sim_miss_final = sum(cps[-1].counts[3:5])   # tiny + fruit/large misses
+                    phantom = sim_miss_final - header_miss
+                    if phantom > 0:
+                        for cp in cps:
+                            c300i, c100i, c50i, tmissi, missi = cp.counts
+                            caughti = c300i + c100i + c50i
+                            missacc = tmissi + missi
+                            adj = (phantom * missacc / sim_miss_final
+                                   if sim_miss_final > 0 else 0.0)
+                            denom = caughti + missacc - adj
+                            cp.accuracy = (caughti / denom) if denom > 0 else 1.0
+                            cp.accuracy = max(0.0, min(1.0, cp.accuracy))
+                        # pin the last checkpoint to the exact header value so
+                        # the counter/grade land on the authoritative number
+                        cps[-1].accuracy = self.real_accuracy
 
     # --- input overlay timeline ----------------------------------------------
 

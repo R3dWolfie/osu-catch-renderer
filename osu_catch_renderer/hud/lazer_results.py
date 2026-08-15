@@ -1165,7 +1165,6 @@ class CatchLazerResults:
         objs = getattr(self.bm, "objects", None) or []
         n_fruit = sum(1 for o in objs if o.kind.name == "FRUIT")
         n_drop = sum(1 for o in objs if o.kind.name == "DROPLET")
-        n_tiny = sum(1 for o in objs if o.kind.name == "TINY_DROPLET")
         n_banana = sum(1 for o in objs if o.kind.name == "BANANA")
         self._map_max_combo = n_fruit + n_drop     # tiny droplets don't combo
         if self._map_max_combo > 0:
@@ -1220,7 +1219,12 @@ class CatchLazerResults:
         for label, caught, total_n, ckey in (
                 ("Fruits", m.count_300, n_fruit, "FRUIT"),
                 ("Drops", m.count_100, n_drop, "DROP"),
-                ("Droplets", m.count_50, n_tiny, "DROPLET")):
+                # tiny-droplet TOTAL is the .osr header's authoritative count
+                # (caught count_50 + missed count_katu), NOT the parsed tiny
+                # count: the geometric parse can generate more tiny droplets
+                # than the real play had (bit-exact RNG spacing we can't
+                # reproduce), which showed a bogus "724/778" on a genuine SS.
+                ("Droplets", m.count_50, m.count_50 + m.count_katu, "DROPLET")):
             if total_n <= 0 and caught <= 0:
                 continue
             frac = _clamp01(caught / total_n) if total_n > 0 else 1.0
