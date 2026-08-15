@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 from osu_catch_renderer.skin.assets import build_textures
 from osu_catch_renderer.beatmap.beatmap import parse_beatmap
 from osu_catch_renderer.render.death import (FAIL_FADE_MS, apply_death,
+                                             apply_fail_audio,
                                              death_progress)
 from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer.render.gl import SpriteRenderer
@@ -642,8 +643,8 @@ def render_core(
 
     # compositing pipeline stage: flashlight + HUD + results run on their own
     # thread (strict FIFO), overlapping the GL draw/readback of later frames.
-    # FAIL death beat (catch only): scale the ~1 s ramp by playback rate so a
-    # DT/HT fail still reads ~1 s of VIDEO. Only wired when `failed`.
+    # FAIL death beat (catch only): scale the ~2.5 s osu fail ramp (FAIL_FADE_MS)
+    # by playback rate so a DT/HT fail still reads ~2.5 s of VIDEO. Only when `failed`.
     _death_arg = float(death_ms) if failed else None
     _death_fade = FAIL_FADE_MS * rate if failed else 0.0
     comp = _CompositeWorker(hud, writer, fl, perf=_pt if _PERF else None,
@@ -782,6 +783,18 @@ def render_core(
         raise CatchRenderError(f"ffmpeg exited {ret}\n{tail}")
     if not output_path.exists() or output_path.stat().st_size < 8_000:
         raise CatchRenderError("output too small / missing — render likely failed")
+    # FAIL audio grind-to-halt (catch only): on a failed play, ramp the muxed
+    # audio's final ~FAIL_FADE_MS before death to a slowing, pitch-dropping,
+    # low-passed stop (osu!'s track freq 1->0), then silence the frozen tail.
+    # Isolated decode->warp->remux post-pass, fully fail-soft; gated on `failed`
+    # so passing renders keep byte-identical audio.
+    if failed:
+        import sys as _fa_sys
+        _death_video_s = (int(death_ms) - start_ms) / rate / 1000.0
+        if apply_fail_audio(output_path, _death_video_s, FAIL_FADE_MS / 1000.0):
+            print(f"[catch] fail-audio grind applied (death @ {_death_video_s:.2f}s "
+                  f"video, window {FAIL_FADE_MS/1000.0:.2f}s)",
+                  file=_fa_sys.stderr, flush=True)
     # score-fidelity sidecar: `<output>.score.json` next to the mp4 — the bot
     # (cli/r3d_render.py) reads it into the completion marker so the website
     # card stores/displays the SAME standardised total the counter ended on.

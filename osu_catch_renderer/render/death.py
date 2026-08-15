@@ -1,75 +1,220 @@
-"""osu!catch fail (death) post-pass — the closing "death beat" of a FAILED play.
+"""osu!catch fail (death) post-pass — a faithful port of osu!lazer's real
+fail animation (``FailAnimationContainer``).
 
 On a FAILED replay the sim is already truncated at ``death_ms`` (no fruit spawn
-past death, catcher frozen). Instead of the video ending on a hard cut, this
-module ramps a death effect over the final ~1 second of gameplay ENDING at
-``death_ms``: the composited frame progressively (a) desaturates toward luma,
-(b) darkens, and (c) takes a dark-red tint — ending on a darkened, frozen
-frame (the osu! fail feel). Frames at/after ``death_ms`` (the ``tail_ms`` hold)
-sit at the fully-dead floor, so the results screen — if enabled — then fades in
-over that darkened frame (gameplay dies, THEN results).
+past death, catcher frozen). Instead of ending on a hard cut, this module plays
+osu!'s fail animation over the final ``FAIL_FADE_MS`` of gameplay ENDING at
+``death_ms`` (lazer plays it FORWARD from the fail instant; we can't render past
+death, so we build the same wind-down UP TO death and hold the dead frame for
+the frozen tail + results).
 
-Applied AFTER flashlight + HUD compositing (unlike the flashlight, which is
-pre-HUD) so the whole frame — playfield and the score / combo / accuracy HUD —
-dies uniformly. The intensity is a pure function of the frame's map time vs.
-``death_ms``; it is ONLY ever invoked on failed plays, so passing renders are
-byte-identical (the caller gates the whole path on ``failed``).
+osu!lazer ``FailAnimationContainer`` (osu.Game/Screens/Play), matched here:
 
-The ramp is defined in map time; the caller scales the window by the playback
-rate (DT/HT) so it always reads as ~1 s of VIDEO. Eased with a smoothstep
-(shared shape with dim.py) so death eases in rather than a linear-harsh wipe.
+    private const float duration = 2500;                       # FAIL_FADE_MS
+    Content.ScaleTo(0.85f, duration, Easing.OutQuart);         # scale-down
+    Content.RotateTo(1,    duration, Easing.OutQuart);         # +1 deg tilt
+    Content.FadeColour(Color4.Gray, duration);                 # darken->gray (linear)
+    redFlashLayer  = Color4.Red.Opacity(0.6f), additive        # red wash
+    this.TransformBindableTo(trackFreq, 0, duration);          # freq 1->0 (audio)
+    failLowPassFilter.CutoffTo(300, duration, Easing.OutCubic);# LP muffle -> 300 Hz
+    volumeAdjustment = 0.5                                      # track volume x0.5
+
+VISUAL (this module, ``apply_death``): the composited frame (playfield AND HUD)
+is affine-transformed — rotate +1 deg, scale to 0.85, and a small downward
+FALL (our addition; lazer masks + darkens rather than translating, but Red
+wants the classic "playfield drops away") — all eased OutQuart to their target
+AT death, over black; then colour-graded (darken toward gray, linear, + an
+additive red wash) so the field dies red-tinted and dark. Applied AFTER
+flashlight + HUD so the whole frame dies together. Held at the floor for the
+frozen tail; the results screen then fades in over the dead frame.
+
+AUDIO (``apply_fail_audio``): the muxed audio's final ``FAIL_FADE_MS`` before
+death is time-warped so playback speed decays 1->0 (a resample, so pitch drops
+WITH speed — the classic record "grinding to a halt"), swept through a low-pass
+to 300 Hz and faded to silence; everything after death is silenced (the song
+has stopped). Done as an isolated decode -> numpy warp -> remux post-pass so it
+touches only failed renders.
+
+Everything here is invoked ONLY on failed plays (the caller gates the whole
+path on ``failed``), so passing renders are byte-identical.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 
-# video-time span of the death ramp (~1 s). The caller multiplies this by the
-# playback rate so DT/HT stay ~1 s on screen.
-FAIL_FADE_MS = 1000.0
+# ── osu!lazer FailAnimationContainer constants ──────────────────────────────
+# video-time span of the fail animation (lazer ``duration = 2500``). The caller
+# multiplies this by the playback rate for the MAP-time window, so DT/HT still
+# read ~2.5 s of VIDEO.
+FAIL_FADE_MS = 2500.0
 
-# full-death (p=1) look, applied AFTER a near-full desaturation:
-_DESAT = 0.85     # how far toward grayscale at full death (1.0 = pure gray)
-_END_R = 0.55     # per-channel brightness floor -> a dark red wash
-_END_G = 0.16
-_END_B = 0.16
+ROT_DEG = 1.0        # Content.RotateTo(1)  — +1 degree tilt
+SCALE_TARGET = 0.85  # Content.ScaleTo(0.85f)
+FALL_FRAC = 0.045    # our addition: content drops this fraction of frame height
+GRAY_MIX = 0.5       # FadeColour(Gray): multiply pixels toward 0.5 (linear)
+RED_ADD = 0.30       # additive red wash (lazer redFlashLayer, Red.Opacity(0.6))
 
 
-def _smoothstep(p: float) -> float:
-    """3p² - 2p³ on [0,1] (clamped) — the same ease dim.py uses."""
+def _out_quart(p: float) -> float:
+    """Easing.OutQuart on [0,1] (clamped): 1-(1-p)^4 (decelerating)."""
     if p <= 0.0:
         return 0.0
     if p >= 1.0:
         return 1.0
-    return p * p * (3.0 - 2.0 * p)
+    q = 1.0 - p
+    return 1.0 - q * q * q * q
 
 
 def death_progress(t_ms: float, death_ms: float, fade_ms: float) -> float:
-    """Eased death intensity in [0,1] at frame map-time ``t_ms``.
+    """Linear death position in [0,1] at frame map-time ``t_ms``.
 
-    0 before the ramp opens (``death_ms - fade_ms``), smoothsteps up to 1 at
-    ``death_ms``, then HELD at 1 for every later (tail / frozen) frame."""
+    0 before the window opens (``death_ms - fade_ms``), ramps LINEARLY to 1 at
+    ``death_ms``, then HELD at 1 for every later (tail / frozen) frame. The
+    per-transform osu easings (OutQuart etc.) are applied in ``apply_death``,
+    matching lazer where each transform carries its own easing over ``duration``."""
     if fade_ms <= 0:
         return 1.0 if t_ms >= death_ms else 0.0
-    return _smoothstep((t_ms - (death_ms - fade_ms)) / fade_ms)
+    p = (t_ms - (death_ms - fade_ms)) / fade_ms
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    return p
 
 
 def apply_death(rgb: "np.ndarray", p: float) -> "np.ndarray":
-    """Blend the death shade into ``rgb`` (H,W,3 uint8) at eased intensity
-    ``p`` in [0,1].
+    """Apply osu!'s fail transform to a composited frame ``rgb`` (H,W,3 uint8)
+    at linear death position ``p`` in [0,1].
 
     ``p <= 0`` returns ``rgb`` unchanged (identity for pre-window frames);
-    otherwise a NEW array. Order: desaturate toward luma, then apply the dark
-    red channel wash — both scaled by ``p`` so the effect grows smoothly to
-    its floor at death."""
+    otherwise a NEW array. Colour-grade first (darken toward gray + additive
+    red wash, linear in ``p``), then affine (rotate +1 deg, scale->0.85, fall),
+    eased OutQuart to their target at death, filling revealed area with black."""
     if p <= 0.0:
         return rgb
     if p > 1.0:
         p = 1.0
+
+    # ── colour grade (numpy): FadeColour(Gray) darken + additive red wash ──
     f = rgb.astype(np.float32)
-    lum = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
-    d = _DESAT * p
-    f = f * (1.0 - d) + lum[..., None] * d
-    f[..., 0] *= 1.0 - (1.0 - _END_R) * p
-    f[..., 1] *= 1.0 - (1.0 - _END_G) * p
-    f[..., 2] *= 1.0 - (1.0 - _END_B) * p
-    return np.clip(f, 0.0, 255.0).astype(np.uint8)
+    f *= (1.0 - GRAY_MIX * p)                 # -> 0.5x brightness at death (gray)
+    f[..., 0] += (RED_ADD * 255.0) * p        # additive red (lazer red layer)
+    np.clip(f, 0.0, 255.0, out=f)
+    graded = f.astype(np.uint8)
+
+    # ── affine (PIL): rotate + scale-down + fall about centre, black fill ──
+    from PIL import Image
+
+    h, w = graded.shape[0], graded.shape[1]
+    eq = _out_quart(p)
+    theta = np.deg2rad(ROT_DEG * eq)
+    s = 1.0 - (1.0 - SCALE_TARGET) * eq       # -> 0.85 at death
+    ty = FALL_FRAC * h * eq                    # downward fall (px)
+    cx, cy = w * 0.5, h * 0.5
+    k = 1.0 / s
+    ct, st = float(np.cos(theta)), float(np.sin(theta))
+    # PIL AFFINE maps OUTPUT->INPUT: xi=a*xo+b*yo+c, yi=d*xo+e*yo+f. This is the
+    # inverse of forward: po = R(theta)*(s*(pi-c)) + c + (0,ty).
+    a = k * ct
+    b = k * st
+    c = cx - k * (ct * cx + st * (cy + ty))
+    d = -k * st
+    e = k * ct
+    fcoef = cy - k * (-st * cx + ct * (cy + ty))
+    img = Image.fromarray(graded).transform(
+        (w, h), Image.AFFINE, (a, b, c, d, e, fcoef),
+        resample=Image.BILINEAR, fillcolor=(0, 0, 0))
+    return np.asarray(img)
+
+
+# ── audio: the record "grinds to a halt" ────────────────────────────────────
+def _lp_sweep(x: "np.ndarray", sr: int, f_hi: float, f_lo: float) -> "np.ndarray":
+    """One-pole low-pass whose cutoff sweeps ``f_hi`` -> ``f_lo`` (Easing.OutCubic)
+    across ``x`` (N,2 float). Mirrors lazer's ``CutoffTo(300, duration, OutCubic)``."""
+    n = len(x)
+    if n == 0:
+        return x
+    t = np.arange(n, dtype=np.float64) / max(1, n - 1)
+    fc = f_hi + (f_lo - f_hi) * (1.0 - (1.0 - t) ** 3)   # OutCubic
+    dt = 1.0 / sr
+    rc = 1.0 / (2.0 * np.pi * fc)
+    alpha = dt / (rc + dt)                                # per-sample smoothing
+    y = np.empty_like(x)
+    prev = x[0].astype(np.float64).copy()
+    xa = x.astype(np.float64)
+    for i in range(n):
+        prev += alpha[i] * (xa[i] - prev)
+        y[i] = prev
+    return y
+
+
+def apply_fail_audio(output_path: "Path | str", death_video_s: float,
+                     window_s: float, *, sr: int = 48000) -> bool:
+    """Grind the muxed audio to a halt at death and silence the tail.
+
+    Decodes ``output_path``'s audio, time-warps the ``window_s`` before
+    ``death_video_s`` so playback speed decays 1->0 (pitch drops with speed —
+    a resampled record slowing to a stop), sweeps a low-pass to 300 Hz, fades
+    to silence, silences everything after death, and remuxes (video copied).
+
+    Fully fail-soft: returns True on success, False (leaving the file
+    untouched) on any problem. ONLY call on failed renders."""
+    output_path = Path(output_path)
+    try:
+        dec = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", str(output_path),
+             "-map", "0:a:0", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-"],
+            capture_output=True)
+        if dec.returncode != 0 or not dec.stdout:
+            return False                       # no audio stream / decode failed
+        A = np.frombuffer(dec.stdout, dtype=np.float32).reshape(-1, 2).copy()
+        n = len(A)
+        if n == 0:
+            return False
+        d = int(round(death_video_s * sr))
+        d = max(0, min(d, n))
+        w = int(round(window_s * sr))
+        w = min(w, d)
+        if w >= 64:
+            seg = A[d - w:d].astype(np.float64)
+            tau = np.arange(w, dtype=np.float64)
+            # speed(tau)=1-tau/w -> source offset = tau - tau^2/(2w) in [0,w/2].
+            # Continuous with the un-warped audio at the window start (offset 0,
+            # speed 1); reads the real last ~w/2 s stretched over w s, slowing.
+            src = tau - (tau * tau) / (2.0 * w)
+            i0 = np.floor(src).astype(np.int64)
+            np.clip(i0, 0, w - 1, out=i0)
+            frac = (src - i0)[:, None]
+            i1 = np.minimum(i0 + 1, w - 1)
+            warped = seg[i0] * (1.0 - frac) + seg[i1] * frac
+            warped = _lp_sweep(warped, sr, 18000.0, 300.0)   # muffle to 300 Hz
+            warped *= (1.0 - tau / w)[:, None]               # fade to silence
+            A[d - w:d] = warped.astype(np.float32)
+        A[d:] = 0.0                            # song has stopped: silence the tail
+
+        tmp = output_path.with_suffix(".failaudio.mp4")
+        mux = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-nostdin",
+             "-i", str(output_path),
+             "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "pipe:0",
+             "-map", "0:v:0", "-map", "1:a:0",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
+             str(tmp)],
+            input=A.astype("<f4").tobytes(), capture_output=True)
+        if mux.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 8000:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        os.replace(tmp, output_path)
+        return True
+    except Exception as e:  # noqa: BLE001 — audio grind never breaks a render
+        print(f"[catch] fail-audio grind skipped: {e}", file=sys.stderr,
+              flush=True)
+        return False
