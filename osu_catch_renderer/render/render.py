@@ -340,7 +340,20 @@ def render_core(
     # — a life dip to 0 on the final note still effectively finished the map.
     last_obj = bm.objects[-1].time_ms
     death_ms = getattr(meta, "death_ms", None)
-    failed = death_ms is not None and death_ms < last_obj - 200
+    _from_lifebar = getattr(meta, "death_from_lifebar", False)
+    if death_ms is None:
+        failed = False
+    elif _from_lifebar:
+        # Reliable stable HP-0: a life dip on the final note still finished the map.
+        failed = death_ms < last_obj - 200
+    else:
+        # Lazer frame-timing fallback (no life bar): "death" is just where the
+        # replay's INPUT stopped, which on a PASS lands before the last object
+        # when the ending needs no catcher movement (bananas / held-still). Only
+        # a REAL fail ends the replay well before the map end — require a
+        # substantial gap (ended before 85% of the map). (Bug 2026-08-16:
+        # ManuAoK lazer catch S — input stops ~2s early, no life bar.)
+        failed = death_ms < last_obj * 0.85
     sim_end_ms = int(death_ms) if failed else None
     sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None,
                    meta=meta, end_ms=sim_end_ms)

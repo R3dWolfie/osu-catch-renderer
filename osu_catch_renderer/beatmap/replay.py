@@ -235,6 +235,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
     # catcher" bug). Capturing the death time lets render_core stop at the
     # fail. NoFail replays never die, so they're exempt.
     death_ms: int | None = None
+    death_from_lifebar = False
     NF = 0x1
     if not (int(r.mods) & NF):
         life_bar = getattr(r, "life_bar_graph", None) or []
@@ -242,6 +243,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
             try:
                 if float(e.life) <= 0.001:
                     death_ms = int(e.time)
+                    death_from_lifebar = True
                     break
             except (TypeError, ValueError, AttributeError):
                 continue
@@ -278,6 +280,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         grade=_grade(acc, r),
         game_version=int(getattr(r, "game_version", 0) or 0),
         death_ms=death_ms,
+        death_from_lifebar=death_from_lifebar,
         timestamp=getattr(r, "timestamp", None),
     )
     return frames, meta

@@ -119,6 +119,10 @@ class ReplayMeta:
     # life-bar graph. None = the play passed / no fail detected. Used to
     # end the render at death instead of rendering the unplayed remainder.
     death_ms: int | None = None
+    # True when death_ms came from the .osr life-bar graph (stable, reliable);
+    # False = the lazer frame-timing fallback, which needs a much larger margin
+    # before it's trusted as a fail (see render.py).
+    death_from_lifebar: bool = False
     # When the play happened (osrparse's parsed .osr timestamp, a datetime);
     # None when unavailable. The results screen's "Played on …" footer.
     timestamp: object = None
