@@ -197,6 +197,7 @@ class RenderConfig:
     show_hp_bar: bool = True
     show_grade: bool = True
     show_mods: bool = True
+    show_progress: bool = True
     # intro R3D "R" splash (parity with std show_logo; off by default so
     # existing renders are unchanged)
     show_logo: bool = False
