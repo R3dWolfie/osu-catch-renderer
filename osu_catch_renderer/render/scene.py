@@ -96,6 +96,7 @@ class CatchSim:
                  skin=None, has_bg: bool = False, meta=None,
                  end_ms: int | None = None):
         self.bm = beatmap
+        self.kiai_ranges = getattr(beatmap.timing, "kiai", []) if beatmap.timing is not None else []
         self.frames = frames
         # catcher facing timeline (lazer VisualDirection) — built lazily from
         # self.frames on first _facing_at call (frames can still be shifted by
@@ -1459,6 +1460,13 @@ class CatchSim:
         # gone) — so _plate_stack/_catch_explosions are deliberately untouched.
         facing = self._facing_at(t_ms) if t_ms is not None else 1.0
         ck = getattr(self.skin, "catcher_key", None) if self.skin is not None else None
+        # osu!catch Catcher.CurrentState = Kiai while catching fruit in a kiai
+        # section (Catcher.cs OnNewResult). Legacy skins swap to
+        # fruit-catcher-kiai; the Argon default catcher has no kiai state.
+        if (t_ms is not None and self.skin is not None
+                and self.skin.has("fruit-catcher-kiai")
+                and any(a <= t_ms < b for a, b in self.kiai_ranges)):
+            ck = "fruit-catcher-kiai"
         if (ck is not None and self.skin.has(ck)
                 and not self.force_argon_catcher):
             # lazer tints the catcher ONLY when hyperdashing, in the skin's

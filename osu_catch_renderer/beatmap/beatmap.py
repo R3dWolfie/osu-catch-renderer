@@ -122,13 +122,16 @@ class _Timing:
     """Resolves beat length and SV multiplier at any time."""
 
     def __init__(self, points: list[tuple[float, float, bool]],
-                 hs_points: list[tuple[float, int, int, int]] | None = None):
+                 hs_points: list[tuple[float, int, int, int]] | None = None,
+                 kiai_ranges: list[tuple[float, float]] | None = None):
         # (time, value, uninherited). value = beatLength for red lines,
         # negative-inverse SV for green lines.
         self.points = points
         # hitsound state per timing point (red AND green lines both carry it):
         # (time, sampleSet 0-3, sampleIndex, volume 0-100). Sorted by time.
         self.hs_points = hs_points or []
+        # kiai regions [(start_ms, end_ms)] — legacy catcher-kiai sprite swap.
+        self.kiai = kiai_ranges or []
 
     def sample_info(self, t: float) -> tuple[int, int, int]:
         """(sampleSet, sampleIndex, volume) active at map-time `t` — the last
@@ -168,6 +171,7 @@ class _Timing:
 def _parse_timing(block: str) -> _Timing:
     pts: list[tuple[float, float, bool]] = []
     hs: list[tuple[float, int, int, int]] = []
+    kpts: list[tuple[float, bool]] = []   # (time, kiai) for kiai ranges
     for line in block.splitlines():
         line = line.strip()
         if not line:
@@ -179,13 +183,28 @@ def _parse_timing(block: str) -> _Timing:
         beat = _f(parts[1], 500.0)
         uninherited = True if len(parts) < 7 else parts[6].strip() == "1"
         pts.append((time, beat, uninherited))
+        kpts.append((time, bool(_i(parts[7], 0) & 1) if len(parts) >= 8 else False))
         # hitsound state: time,beatLength,meter,sampleSet,sampleIndex,volume,…
         if len(parts) >= 6:
             hs.append((time, _i(parts[3], 0), _i(parts[4], 0),
                        max(0, min(100, _i(parts[5], 100)))))
     pts.sort(key=lambda p: p[0])
     hs.sort(key=lambda p: p[0])
-    return _Timing(pts, hs)
+    kpts.sort(key=lambda p: p[0])
+    # Kiai regions: a TP with the kiai bit on runs until the next TP with it
+    # off (or end of map). Only affects LEGACY skins that ship
+    # fruit-catcher-kiai; the Argon default catcher ignores kiai (lazer
+    # ArgonCatcher does too).
+    kiai_ranges: list[tuple[float, float]] = []
+    _kstart: float | None = None
+    for _kt, _kon in kpts:
+        if _kon and _kstart is None:
+            _kstart = _kt
+        elif not _kon and _kstart is not None:
+            kiai_ranges.append((_kstart, _kt)); _kstart = None
+    if _kstart is not None:
+        kiai_ranges.append((_kstart, float("inf")))
+    return _Timing(pts, hs, kiai_ranges)
 
 
 def _i(s, default: int) -> int:
