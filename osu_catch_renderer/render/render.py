@@ -815,8 +815,14 @@ def render_core(
         try:
             import json as _json
             sidecar = Path(str(output_path) + ".score.json")
+            # Gameplay-start anchor for the YT versus HUD (all-mode sync):
+            # video-seconds into THIS panel where map-time 0 lands (frame 0 is
+            # map-time start_ms), plus the rate-mods speed.
+            _map0_video_s = round((0 - start_ms) / (rate * 1000.0), 6)
             sidecar.write_text(_json.dumps(
-                {"schema": 1, "mode": 2, **score_fid}, default=str))
+                {"schema": 1, "mode": 2,
+                 "map0_video_s": _map0_video_s, "rate": float(rate),
+                 **score_fid}, default=str))
         except Exception as _sc_e:  # noqa: BLE001 — sidecar is best-effort
             print(f"[catch] score sidecar write failed: {_sc_e}",
                   file=sys.stderr, flush=True)
