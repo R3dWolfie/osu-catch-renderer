@@ -910,16 +910,23 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
 
     # video codec + pixel path
     if enc == "h264_vaapi":
-        cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", "8M"]
+        _vb = str(cfg.video_bitrate) if cfg.video_bitrate else "8M"
+        cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", _vb]
     elif enc == "h264_nvenc":
         # Resolution-scaled bitrate ladder (was flat 8M) -- R3D cross-engine
         # NVENC policy; see nvenc_target_bps above.
-        _tgt = nvenc_target_bps(w, h, cfg.fps)
+        _tgt = cfg.video_bitrate or nvenc_target_bps(w, h, cfg.fps)
         cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
                 "-b:v", str(_tgt), "-maxrate", str(int(_tgt * 1.5)),
                 "-bufsize", str(_tgt * 2)]
     else:
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", "20"]
+        if cfg.video_bitrate:
+            _vb = int(cfg.video_bitrate)
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
+                    "-bufsize", str(_vb * 2)]
+        else:
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", "20"]
 
     if audio is not None:
         # `prenorm` -> canonical builders (rate/pitch + loudnorm are baked into

@@ -18,6 +18,17 @@ def _resolution(s: str) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def _bitrate(s: str) -> int:
+    """Video bitrate: '16M' / '24000k' / '16000000' -> bits per second."""
+    s = s.strip().lower()
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    return int(float(s) * mult)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="osu_catch_renderer")
     ap.add_argument("osr", type=Path, help="replay .osr file")
@@ -28,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--encoder", default="auto",
                     help="auto | h264_vaapi | h264_nvenc | libx264")
     ap.add_argument("--encoder-device", default=None, help="e.g. /dev/dri/renderD128")
+    ap.add_argument("--video-bitrate", type=_bitrate, default=None,
+                    help="override the auto resolution-scaled bitrate, e.g. "
+                         "16M / 24M / 30000k. Default: the built-in ladder.")
     ap.add_argument("--skin", type=Path, default=None, help="extracted skin dir (e.g. Night05)")
     ap.add_argument("--default-skin", type=Path, default=None, help="fallback skin dir")
     ap.add_argument("--combo-colors", choices=("beatmap", "skin"), default="beatmap",
@@ -143,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         encoder=args.encoder,
         encoder_device=args.encoder_device,
+        video_bitrate=args.video_bitrate,
         skin_dir=args.skin,
         default_skin_dir=args.default_skin,
         skip_intro=args.skip_intro,

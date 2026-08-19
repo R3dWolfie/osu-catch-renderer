@@ -134,6 +134,7 @@ class RenderConfig:
     fps: int = 60
     encoder: str = "auto"               # auto | h264_vaapi | h264_nvenc | libx264
     encoder_device: str | None = None   # e.g. /dev/dri/renderD128
+    video_bitrate: int | None = None    # override the auto bitrate ladder (bps)
     skin_dir: Path | None = None        # user skin (extracted .osk dir, e.g. Night05)
     default_skin_dir: Path | None = None  # fallback skin for missing elements
     # visual tuning
