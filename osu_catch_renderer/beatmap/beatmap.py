@@ -474,7 +474,15 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     out: list[CatchObject] = list(head)
     prev = events[0]
     for cur in events[1:]:
-        since = cur[0] - prev[0]
+        # osu!catch generates tinies against INTEGER-truncated event times:
+        # lazer computes sinceLastTick = (int)e.Time - (int)lastEvent.Value.Time
+        # (JuiceStream.CreateNestedHitObjects). Using the raw float gap here
+        # over-halves the interval near 100*2^k boundaries (float 200.1 keeps
+        # halving to 3 tinies where int 200 stops at 1), over-generating tiny
+        # droplets on some tick-rate/SV/slider patterns. Truncate to match the
+        # game exactly. The tiny StartTime/PathProgress below still use the raw
+        # float prev[0]/prev[1], exactly as lazer uses lastEvent.Value.Time.
+        since = int(cur[0]) - int(prev[0])
         if since > 80:
             tb = since
             while tb > 100:
