@@ -826,6 +826,69 @@ def render_core(
         except Exception as _sc_e:  # noqa: BLE001 — sidecar is best-effort
             print(f"[catch] score sidecar write failed: {_sc_e}",
                   file=sys.stderr, flush=True)
+
+    # dash sidecar: `<output>.dash.json` — per-player dash timeline for the YT
+    # versus overlay, which parses replays with osrparse directly and so reads
+    # `dashing=False` for every frame on any replay whose Left1 bit shares its
+    # byte with another button (e.g. Smoke=16 -> ButtonState 17; osrparse's
+    # exact `==1` compare fails). The renderer already recovers dash (raw Left1
+    # bit mask, or velocity reconstruction — see replay.py), so we export the
+    # authoritative per-player dash so the overlay consumes it instead of its
+    # own broken osrparse count. Opt-in via R3D_CATCH_DASH_SIDECAR (default off,
+    # so every existing render is byte-identical); fully fail-soft.
+    if os.environ.get("R3D_CATCH_DASH_SIDECAR"):
+        try:
+            import json as _json
+
+            def _dash_runs(fr):
+                """(runs, edges, dash_frames): dash intervals [start_ms,end_ms]
+                in MAP time; edges = rising-edge (dash-press) count = len(runs);
+                dash_frames = frames with dash held."""
+                runs = []
+                start = None
+                held = 0
+                for f in fr:
+                    if f.dashing:
+                        held += 1
+                        if start is None:
+                            start = f.time_ms
+                    elif start is not None:
+                        runs.append([start, prev])
+                        start = None
+                    prev = f.time_ms
+                if start is not None:
+                    runs.append([start, prev])
+                return runs, len(runs), held
+
+            # (name, frames, dash_derived) per player, primary first. sim.frames
+            # is the timeline-shifted stream the engine actually rendered.
+            _dash_players = [(getattr(meta, "player_name", ""),
+                              base_sim.frames, getattr(meta, "dash_derived", False))]
+            if overlay_extra:
+                for _es, (_f, _mt, _n) in zip(extra_sims, overlay_extra):
+                    _dash_players.append(
+                        (getattr(_mt, "player_name", "") or _n, _es.frames,
+                         getattr(_mt, "dash_derived", False)))
+            _players_out = []
+            for _nm, _fr, _drv in _dash_players:
+                _runs, _edges, _held = _dash_runs(_fr)
+                _players_out.append({
+                    "player": _nm,
+                    "source": "velocity_derived" if _drv else "legacy_bit",
+                    "dash_edges": _edges,
+                    "dash_frames": _held,
+                    "total_frames": len(_fr),
+                    "runs": _runs,
+                })
+            _map0_video_s = round((0 - start_ms) / (rate * 1000.0), 6)
+            dash_sidecar = Path(str(output_path) + ".dash.json")
+            dash_sidecar.write_text(_json.dumps(
+                {"schema": 1, "mode": 2,
+                 "map0_video_s": _map0_video_s, "rate": float(rate),
+                 "players": _players_out}))
+        except Exception as _dc_e:  # noqa: BLE001 — sidecar is best-effort
+            print(f"[catch] dash sidecar write failed: {_dc_e}",
+                  file=sys.stderr, flush=True)
     if progress_callback:
         progress_callback(100)
     return output_path

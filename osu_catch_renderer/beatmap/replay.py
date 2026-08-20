@@ -17,6 +17,78 @@ from osu_catch_renderer.beatmap.models import CatchFrame, ReplayMeta
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345
 
+# --- velocity-based dash reconstruction ------------------------------------
+# osu!catch physics, from osu.Game.Rulesets.Catch/UI/Catcher.cs +
+# CatcherArea.cs:
+#   Speed => (Dashing ? BASE_DASH_SPEED : BASE_WALK_SPEED) * hyperDashModifier
+#   CatcherArea.Update: X += Catcher.Speed * direction * Clock.ElapsedFrameTime
+# so while WALKING the catcher moves at most BASE_WALK_SPEED osu x-units per ms
+# of frame time. Any frame whose average speed |dx|/dt exceeds that REQUIRES
+# the dash key (walk physically cannot cover the distance). This lets us
+# reconstruct the dash timeline when the legacy dash bit is missing (a lazer
+# export read through an exact `ButtonState == Left1` compare, or any replay
+# whose Left1 bit never survived — see CatchReplayFrame.FromLegacy/ToLegacy).
+_BASE_WALK_SPEED = 0.5          # osu x-units per ms (lazer constant)
+_DASH_VEL_THRESH = _BASE_WALK_SPEED
+# Debounce (walk/dash speeds overlap and per-frame x jitters, so a bare
+# threshold strobes ~2500 phantom edges on a play with ~420 real ones):
+#   * merge non-dash gaps shorter than _DASH_GAP_MS into the surrounding dash
+#     (one dash-hold dips below walk speed on direction changes / brief pauses)
+#   * then drop dash blips shorter than _DASH_MIN_MS (single fast walk frames).
+# Tuned on Motion's SEV-26 HR replay (legacy-bit ground truth 423 rising edges
+# / 77.0% dash frames): these constants reproduce 425 edges / 80% — i.e. the
+# real dash timeline, not the naive threshold's ~2500.
+_DASH_MIN_MS = 85
+_DASH_GAP_MS = 60
+
+
+def _derive_dash_from_velocity(frames: list["CatchFrame"]) -> list[bool]:
+    """Reconstruct per-frame dash from catcher velocity (frames MUST be sorted
+    by time). Returns a bool per frame. See the constants above for the model:
+    threshold at lazer's BASE_WALK_SPEED, then close short gaps and open short
+    blips so a stable replay reproduces ~its real dash-edge count."""
+    n = len(frames)
+    if n < 2:
+        return [False] * n
+    raw = [False] * n
+    for i in range(1, n):
+        dt = frames[i].time_ms - frames[i - 1].time_ms
+        if dt <= 0:
+            raw[i] = raw[i - 1]        # zero-span frame: carry previous state
+            continue
+        v = abs(frames[i].x - frames[i - 1].x) / dt
+        raw[i] = v > _DASH_VEL_THRESH
+    out = raw[:]
+    # close: bridge False runs shorter than _DASH_GAP_MS that sit between dashes
+    i = 1
+    while i < n:
+        if not out[i]:
+            j = i
+            while j < n and not out[j]:
+                j += 1
+            span_end = frames[j].time_ms if j < n else frames[n - 1].time_ms
+            if out[i - 1] and j < n and (span_end - frames[i - 1].time_ms) < _DASH_GAP_MS:
+                for k in range(i, j):
+                    out[k] = True
+            i = j
+        else:
+            i += 1
+    # open: drop True runs shorter than _DASH_MIN_MS (walk-jitter spikes)
+    i = 0
+    while i < n:
+        if out[i]:
+            j = i
+            while j < n and out[j]:
+                j += 1
+            span_end = frames[j].time_ms if j < n else frames[n - 1].time_ms
+            if (span_end - frames[i].time_ms) < _DASH_MIN_MS:
+                for k in range(i, j):
+                    out[k] = False
+            i = j
+        else:
+            i += 1
+    return out
+
 
 class ReplayParseError(RuntimeError):
     pass
@@ -217,6 +289,24 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         frames.append(CatchFrame(time_ms=max(t, 0), x=float(x), dashing=dash))
     frames.sort(key=lambda f: f.time_ms)
 
+    # Dash fallback: if NOT ONE frame reads as dashing yet the catcher clearly
+    # moved faster than walk speed at some point, the legacy dash bit is missing
+    # (lazer's CatchReplayFrame.FromLegacy/ToLegacy round-trips dash through an
+    # exact `ButtonState == Left1` compare, which osrparse and lazer alike read
+    # as never-dashing whenever any other button bit rides along, e.g. Smoke;
+    # and a pure no-Left1 export has no bit at all). Reconstruct dash from the
+    # catcher's frame-to-frame velocity vs lazer's BASE_WALK_SPEED so the
+    # catcher's dash trail/animation AND the overlay dash count are correct.
+    # A genuine no-dash play (all-walk) leaves max velocity <= walk speed, so
+    # `any(derived)` stays False and the replay is left byte-identical.
+    dash_derived = False
+    if frames and not any(f.dashing for f in frames):
+        derived = _derive_dash_from_velocity(frames)
+        if any(derived):
+            frames = [CatchFrame(time_ms=f.time_ms, x=f.x, dashing=d)
+                      for f, d in zip(frames, derived)]
+            dash_derived = True
+
     # osu!catch accuracy: every caught object (fruit / large droplet /
     # tiny droplet) counts equally; the denominator includes missed tiny
     # droplets (count_katu) and missed fruit/large droplets (count_miss).
@@ -281,6 +371,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
         game_version=int(getattr(r, "game_version", 0) or 0),
         death_ms=death_ms,
         death_from_lifebar=death_from_lifebar,
+        dash_derived=dash_derived,
         timestamp=getattr(r, "timestamp", None),
     )
     return frames, meta

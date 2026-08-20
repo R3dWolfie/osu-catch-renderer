@@ -123,6 +123,13 @@ class ReplayMeta:
     # False = the lazer frame-timing fallback, which needs a much larger margin
     # before it's trusted as a fail (see render.py).
     death_from_lifebar: bool = False
+    # True when the per-frame dash state was RECONSTRUCTED from catcher velocity
+    # (replay carried no usable legacy dash bit — every frame read non-dashing
+    # despite real movement; see replay._derive_dash_from_velocity). False = the
+    # dash state is the replay's own Left1 bit. Surfaced in the dash sidecar as
+    # `source` so the YT overlay knows whether the dash timeline is measured or
+    # derived.
+    dash_derived: bool = False
     # When the play happened (osrparse's parsed .osr timestamp, a datetime);
     # None when unavailable. The results screen's "Played on …" footer.
     timestamp: object = None
