@@ -148,13 +148,23 @@ class _Timing:
         return cur[1], cur[2], cur[3]
 
     def beat_length(self, t: float) -> float:
-        bl = 500.0
-        for time, val, uninh in self.points:
+        # osu! (stable + lazer ControlPointInfo.TimingPointAt) extends the FIRST
+        # uninherited timing point backward to -inf: an object placed before the
+        # first red line uses that first line's beatLength, NOT a 500ms default.
+        # (Common: first object 1-2ms before the first timing point -> its slider
+        # would otherwise get velocity ~half, doubling span duration and mangling
+        # repeats/tail positions.) 500.0 is only correct when there are NO
+        # uninherited points at all.
+        bl = None
+        for time, val, uninh in self.points:   # sorted by time
+            if uninh and val > 0:
+                if bl is None:
+                    bl = val          # backward fallback = first uninherited line
+                if time <= t:
+                    bl = val          # last uninherited line at/before t
             if time > t:
                 break
-            if uninh and val > 0:
-                bl = val
-        return bl
+        return bl if bl is not None else 500.0
 
     def sv_mult(self, t: float) -> float:
         mult = 1.0
