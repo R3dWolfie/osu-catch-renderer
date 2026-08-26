@@ -29,7 +29,7 @@ from osu_catch_renderer.render.death import (FAIL_FADE_MS, apply_death,
 from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer.render.gl import SpriteRenderer
 from osu_catch_renderer.render import loudnorm_cache
-from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms
+from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms, ObjType
 from osu_catch_renderer.beatmap.replay import parse_replay
 from osu_catch_renderer.render.scene import CatchSim, mods_score_multiplier
 
@@ -349,11 +349,20 @@ def render_core(
     else:
         # Lazer frame-timing fallback (no life bar): "death" is just where the
         # replay's INPUT stopped, which on a PASS lands before the last object
-        # when the ending needs no catcher movement (bananas / held-still). Only
-        # a REAL fail ends the replay well before the map end — require a
-        # substantial gap (ended before 85% of the map). (Bug 2026-08-16:
-        # ManuAoK lazer catch S — input stops ~2s early, no life bar.)
-        failed = death_ms < last_obj * 0.85
+        # when the ending needs no catcher movement (bananas / held-still). The
+        # header proves a clear DETERMINISTICALLY: osu!catch judges every fruit +
+        # big droplet (caught OR missed), so if count_300+count_100+count_miss
+        # covers (essentially) all generated FD, the player reached the end and
+        # it is NOT a fail. Only a genuine early death leaves FD objects unjudged.
+        # Replaces the old <0.85*last heuristic (which could truncate a clear that
+        # ends >15% early -> render a fabricated FC) and matches the guard in
+        # versus_telemetry. (Bugs 2026-08-16 ManuAoK lazer S; 2026-08-26 Veeti
+        # fabricated FC on the snap he missed.)
+        _total_fd = sum(1 for o in bm.objects
+                        if o.kind in (ObjType.FRUIT, ObjType.DROPLET))
+        _hdr_fd = int(meta.count_300) + int(meta.count_100) + int(meta.count_miss)
+        _cleared = _hdr_fd >= _total_fd - 4
+        failed = (death_ms < last_obj - 200) and not _cleared
     sim_end_ms = int(death_ms) if failed else None
     sim = CatchSim(bm, frames, cfg, skin=skin, has_bg=bg is not None,
                    meta=meta, end_ms=sim_end_ms)
