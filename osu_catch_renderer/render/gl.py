@@ -1,8 +1,9 @@
 """Minimal moderngl sprite batch for the catch renderer.
 
 Owns a standalone EGL context and an offscreen RGBA framebuffer. Draws
-textured/solid quads with straight-alpha blending in painter's order, then
-reads back tightly-packed RGB24 for the ffmpeg pipe. Deliberately tiny and
+textured/solid quads with straight-alpha blending in painter's order, then a
+GPU flip pass + RGBA readback feeds the zero-copy CPU compositing pipeline
+(ffmpeg ingests -pix_fmt rgba; alpha is ignored). Deliberately tiny and
 self-contained so it can be discarded when the VRender branch takes over.
 """
 from __future__ import annotations
@@ -51,6 +52,33 @@ out vec4 f_color;
 void main() {
     vec4 t = texture(u_tex, v_uv);
     f_color = t * u_color;
+}
+"""
+
+# RGBA ZERO-COPY PIPELINE (2026-08-28): a 1:1 NEAREST V-flip pass copies the
+# scene FBO into a second FBO so the glReadPixels byte stream comes out
+# TOP-DOWN already — the CPU never pays the flip (the old path returned a
+# negative-stride view whose flip cost resurfaced as a 6 MB copy somewhere
+# downstream every frame). Pixel-exact: 1:1 texel mapping, NEAREST, blending
+# disabled during the pass.
+_FLIP_VERT = """
+#version 330
+in vec2 in_pos;
+in vec2 in_uv;
+out vec2 v_uv;
+void main() {
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+    v_uv = in_uv;
+}
+"""
+
+_FLIP_FRAG = """
+#version 330
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 f_color;
+void main() {
+    f_color = texture(u_tex, v_uv);
 }
 """
 
@@ -108,8 +136,32 @@ class SpriteRenderer:
         self._cur_uv_off = (0.0, 0.0)
         self._cur_uv_scale = (1.0, 1.0)
 
-        rb = self.ctx.renderbuffer((width, height))
-        self.fbo = self.ctx.framebuffer(color_attachments=[rb])
+        # Scene target is a TEXTURE (not a renderbuffer) so the flip pass can
+        # sample it. Rendering into a texture attachment is identical to a
+        # renderbuffer attachment. NEAREST filter: the flip pass must be a
+        # pixel-exact 1:1 copy.
+        self._scene_tex = self.ctx.texture((width, height), 4)
+        self._scene_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self.fbo = self.ctx.framebuffer(color_attachments=[self._scene_tex])
+        # flip-pass target: readback happens from here (top-down byte order).
+        self._flip_fbo = self.ctx.framebuffer(
+            color_attachments=[self.ctx.renderbuffer((width, height))])
+        self._flip_prog = self.ctx.program(vertex_shader=_FLIP_VERT,
+                                           fragment_shader=_FLIP_FRAG)
+        self._flip_prog["u_tex"].value = 0
+        # Fullscreen strip mapping output row 0 (GL bottom, read FIRST by
+        # glReadPixels) to the scene's TOP row (v=1): the packed stream is
+        # top-left origin without any CPU flip.
+        _fq = np.array([
+            -1.0, -1.0, 0.0, 1.0,
+             1.0, -1.0, 1.0, 1.0,
+            -1.0,  1.0, 0.0, 0.0,
+             1.0,  1.0, 1.0, 0.0,
+        ], dtype="f4")
+        self._flip_vbo = self.ctx.buffer(_fq.tobytes())
+        self._flip_vao = self.ctx.vertex_array(
+            self._flip_prog, [(self._flip_vbo, "2f 2f", "in_pos", "in_uv")],
+        )
         self._textures: dict[str, moderngl.Texture] = {}
         self._white = self._make_texture_rgba(np.full((1, 1, 4), 255, dtype="u1"))
 
@@ -206,30 +258,38 @@ class SpriteRenderer:
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
     _PBO_RING = 3
-    _HOST_POOL = 8             # see _pbo_host note in read_rgb_async
+    # RGBA zero-copy: the frames handed out by _pop_pbo are now mutated in
+    # place by the HUD and pushed AS-IS through the composite queue (3) AND
+    # the writer queue (12) — the pool must outlive every queued reference:
+    # ring(3) + composite queue(3) + composite in-process(1) + writer
+    # queue(12) + writer in-write(1) + slack. 24 x ~8.3 MB @1080p ≈ 200 MB.
+    _HOST_POOL = 24
 
     def read_rgb_async(self) -> "np.ndarray | None":
-        """Queue an async readback of the current fbo into a small PBO
-        ring and return the OLDEST completed frame (top-left origin), or
-        None while the ring is still filling. Frames come back in strict
-        submission order — the render loop pushes them straight to ffmpeg,
-        so the byte stream is identical to the synchronous read_rgb path,
-        just ~RING-1 frames late. read_drain() flushes the tail. (Ported
-        from the std renderer's proven osu_std_renderer/render/gl.py.)"""
+        """Queue an async readback of the current frame into a small PBO
+        ring and return the OLDEST completed frame, or None while the ring
+        is still filling. Frames come back in strict submission order —
+        the render loop pushes them straight to the compositor. RGBA
+        ZERO-COPY PIPELINE: a GPU flip pass makes the packed stream
+        top-left origin, so the returned array is a top-down CONTIGUOUS
+        WRITABLE HxWx4 view of a pooled staging buffer — the HUD wraps it
+        in PIL zero-copy, draws in place, and the SAME buffer flows to the
+        ffmpeg pipe (-pix_fmt rgba). read_drain() flushes the tail."""
         if self._pbos is None:
-            size = self.width * self.height * 3
+            size = self.width * self.height * 4
             self._pbos = [self.ctx.buffer(reserve=size)
                           for _ in range(self._PBO_RING)]
-            # PERF: pooled CPU staging buffers — read_into() replaces
-            # buf.read()'s fresh 6 MB bytes object per frame. The pool is
-            # DEEPER than the PBO ring because popped frames now sit in the
-            # composite stage's bounded queue (depth 3) before being
-            # consumed; pool > ring + composite queue + in-process + 1 keeps
-            # a queued frame from ever being overwritten (strict FIFO).
+            # Pooled CPU staging buffers — see _HOST_POOL note above.
             self._pbo_host = [bytearray(size) for _ in range(self._HOST_POOL)]
             self._host_i = 0
+        # GPU flip pass (blending OFF: raw texel copy, pixel-exact 1:1).
+        self._flip_fbo.use()
+        self.ctx.disable(moderngl.BLEND)
+        self._scene_tex.use(location=0)
+        self._flip_vao.render(moderngl.TRIANGLE_STRIP)
+        self.ctx.enable(moderngl.BLEND)
         buf = self._pbos[self._pbo_head % len(self._pbos)]
-        self.fbo.read_into(buf, components=3, alignment=1)
+        self._flip_fbo.read_into(buf, components=4, alignment=1)
         self._pbo_head += 1
         if self._pbo_head - self._pbo_tail < len(self._pbos):
             return None
@@ -241,9 +301,12 @@ class SpriteRenderer:
         host = self._pbo_host[self._host_i % len(self._pbo_host)]
         self._host_i += 1
         buf.read_into(host)
-        arr = np.frombuffer(host, dtype="u1").reshape(
-            (self.height, self.width, 3))
-        return arr[::-1]  # same orientation contract as read_rgb (flip view)
+        # top-left origin already (GPU flip pass) — contiguous + writable,
+        # ready for the zero-copy PIL wrap. NOTE the alpha channel carries
+        # GL blend garbage; ffmpeg's rgba input ignores it, and every CPU
+        # consumer that READS the canvas forces alpha itself.
+        return np.frombuffer(host, dtype="u1").reshape(
+            (self.height, self.width, 4))
 
     def read_drain(self) -> list:
         """Return every frame still in flight, oldest first (map end or

@@ -1275,7 +1275,14 @@ class CatchLazerResults:
             base = Image.new("RGBA", (rgb.shape[1], rgb.shape[0]),
                              (0, 0, 0, 255))
         else:
-            base = Image.fromarray(rgb, "RGB").convert("RGBA")
+            # RGBA pipeline: last_gameplay is HxWx4 with GL-garbage alpha —
+            # force it opaque so alpha_composite matches the old
+            # RGB->RGBA convert exactly. 3ch input keeps the old path.
+            if rgb.ndim == 3 and rgb.shape[2] == 4:
+                base = Image.fromarray(rgb, "RGBA")
+                base.putalpha(255)
+            else:
+                base = Image.fromarray(rgb, "RGB").convert("RGBA")
             base = Image.alpha_composite(
                 base, Image.new("RGBA", base.size, (0, 0, 0, int(op * 255))))
 
@@ -1301,7 +1308,14 @@ class CatchLazerResults:
                 self._draw_stats_panels(base, age_ms, op)
             self._draw_panel(base, age_ms, fade, panel_cx)
 
-        out = np.asarray(base.convert("RGB"))
+        # RGBA pipeline: keep 4 channels when the input frame was 4ch — the
+        # ffmpeg pipe is rgba now. base's alpha is opaque throughout (built
+        # from putalpha(255) / (0,0,0,255)), the encoder ignores it anyway;
+        # RGB values are identical to the old convert("RGB") return.
+        if rgb.ndim == 3 and rgb.shape[2] == 4:
+            out = np.asarray(base)
+        else:
+            out = np.asarray(base.convert("RGB"))
         if settled:
             self._settled = out
         if sig is not None:

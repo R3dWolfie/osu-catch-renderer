@@ -43,12 +43,23 @@ class _CatchHud:
 
 
 def _img_from_rgb(rgb: "np.ndarray") -> Image.Image:
-    """PIL image from an HxWx3 uint8 frame. PERF (output-identical): the GL
-    readback is a bottom-up CONTIGUOUS buffer exposed as a flipud view;
-    Image.fromarray on that view pays a strided numpy tobytes pass AND the
-    raw-decode copy. PIL's raw decoder can do the vertical flip itself
-    (orientation -1) inside its single copy, so hand it the contiguous
-    bottom-up buffer directly. Any other layout falls back to fromarray."""
+    """PIL canvas over a frame array. RGBA ZERO-COPY PIPELINE (2026-08-28):
+    the GL readback is now a top-down CONTIGUOUS WRITABLE HxWx4 buffer, and
+    RGBA is PIL's native 32-bit layout, so `frombuffer` SHARES the memory —
+    with `readonly = 0` every paste/draw mutates the frame in place and the
+    overlay hands the SAME array straight to the ffmpeg (rgba) pipe: the two
+    full-frame 24<->32-bit repack copies per frame (decode in, encode out)
+    are gone. `_img_out` recovers the backing array via `_r3d_backing`.
+    CAUTION: the canvas ALPHA is GL blend garbage — any consumer that READS
+    canvas pixels for alpha-aware math must force alpha itself (ffmpeg's
+    rgba input ignores it). Legacy 3-channel paths keep their old copies."""
+    if (rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[2] == 4
+            and rgb.flags.c_contiguous and rgb.flags.writeable):
+        img = Image.frombuffer(
+            "RGBA", (rgb.shape[1], rgb.shape[0]), rgb, "raw", "RGBA", 0, 1)
+        img.readonly = 0
+        img._r3d_backing = rgb
+        return img
     if (rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[2] == 3
             and rgb.strides[0] < 0):
         flipped = rgb[::-1]
@@ -56,7 +67,18 @@ def _img_from_rgb(rgb: "np.ndarray") -> Image.Image:
             return Image.frombuffer(
                 "RGB", (rgb.shape[1], rgb.shape[0]), flipped,
                 "raw", "RGB", 0, -1)
-    return Image.fromarray(rgb, "RGB")
+    return Image.fromarray(rgb, "RGBA" if rgb.shape[2] == 4 else "RGB")
+
+
+def _img_out(img: Image.Image) -> "np.ndarray":
+    """The frame array to push down the pipe for a canvas built by
+    _img_from_rgb: the shared backing array when the zero-copy wrap is
+    active (all in-place mutations are already in it — no copy), else the
+    old full-frame np.asarray copy."""
+    backing = getattr(img, "_r3d_backing", None)
+    if backing is not None:
+        return backing
+    return np.asarray(img)
 
 
 class DanserHud:
@@ -276,7 +298,7 @@ class DanserHud:
                 ah.draw_progress(img, t)
             self._draw_overlay_board(img, board, t)
             self._draw_watermark(img)
-            return np.asarray(img)
+            return _img_out(img)
         # ---- SCORE WEDGES (ArgonWedgePiece backdrops, UNDER bar + score) ----
         if _on("show_score") or _on("show_hp_bar"):
             ah.draw_wedges(img)
@@ -291,7 +313,10 @@ class DanserHud:
             # composites clip identically inside it; pixels are unchanged).
             xa, ya, xb, yb = self.argon_hp.clip_box(self.w, self.h)
             if xb > xa and yb > ya:
-                sub = np.array(img.crop((xa, ya, xb, yb)))
+                # RGBA canvas: force the crop to RGB — argon_health's blend
+                # math is 3-channel, and the canvas alpha is GL garbage.
+                # Pasting the RGB result back auto-converts (alpha=255).
+                sub = np.array(img.crop((xa, ya, xb, yb)).convert("RGB"))
                 self.argon_hp.update_draw(sub, scene.hp, dt, origin=(xa, ya))
                 img.paste(Image.fromarray(sub, "RGB"), (xa, ya))
             else:                       # fully off-screen: advance state only
@@ -347,7 +372,7 @@ class DanserHud:
         self.break_overlay.draw(img, t, scene.accuracy)
 
         self._draw_watermark(img)
-        return np.asarray(img)
+        return _img_out(img)
 
     def _input_from_scene(self, scene):
         """(held, counts) for the key overlay. The sim now supplies REPLAY-
@@ -394,7 +419,7 @@ class DanserHud:
                 self._draw_argon_song_progress(img, int(scene.time_ms))
             self._draw_overlay_board(img, board, t)
             self._draw_watermark(img)
-            return np.asarray(img)
+            return _img_out(img)
         # ---- HEALTH BAR (top-left; catch's argon_health at STD's spot) ----
         if _on("show_hp_bar"):
             # LEGACY layout -> LegacyHealthDisplay (skin's scorebar sprites when it
@@ -592,7 +617,7 @@ class DanserHud:
 
         # watermark (bottom-right)
         self._draw_watermark(img)
-        return np.asarray(img)
+        return _img_out(img)
 
     def _draw_overlay_board(self, img, board, t) -> None:
         """Versus Overlay leaderboard — the REAL std versus-merge `MergeBoard`
@@ -939,6 +964,10 @@ class DanserHud:
         if bx1 <= bx0 or by1 <= by0:
             return
         sub = img.crop((bx0, by0, bx1, by1)).convert("RGBA")
+        # RGBA canvas: crop keeps the GL-garbage alpha, which would skew
+        # alpha_composite's per-pixel math. Force the base opaque — exactly
+        # what convert("RGBA") produced when the canvas was RGB.
+        sub.putalpha(255)
         layer = Image.new("RGBA", sub.size, (0, 0, 0, 0))
         ld = ImageDraw.Draw(layer)
         for rr, a in ((mr * 1.9, 45), (mr * 1.35, 90)):
@@ -1001,6 +1030,9 @@ class DanserHud:
             by1 = min(img.height, int(y) + box + 3)
             if bx1 > bx0 and by1 > by0:
                 sub = img.crop((bx0, by0, bx1, by1)).convert("RGBA")
+                # RGBA canvas: force the base opaque (GL-garbage alpha would
+                # skew alpha_composite) — matches the old RGB->RGBA convert.
+                sub.putalpha(255)
                 layer = Image.new("RGBA", sub.size, (0, 0, 0, 0))
                 ImageDraw.Draw(layer).pieslice(
                     [pb[0] - bx0, pb[1] - by0, pb[2] - bx0, pb[3] - by0],
@@ -1882,7 +1914,13 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
     """
     import numpy as np
     a = max(0.0, min(1.0, opacity))
-    img = Image.fromarray(rgb, "RGB").convert("RGBA")
+    # RGBA pipeline: last_gameplay is HxWx4 with GL-garbage alpha — force it
+    # opaque so alpha_composite matches the old RGB->RGBA convert exactly.
+    if rgb.ndim == 3 and rgb.shape[2] == 4:
+        img = Image.fromarray(rgb, "RGBA")
+        img.putalpha(255)
+    else:
+        img = Image.fromarray(rgb, "RGB").convert("RGBA")
     img = Image.alpha_composite(img, Image.new("RGBA", img.size, (0, 0, 0, int(0.7 * a * 255))))
     W, H = img.size
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -1977,6 +2015,12 @@ def _draw_results_legacy(rgb, meta, bm, opacity: float, board=None):
             draw_board(out, board, opacity)
         except Exception:  # noqa: BLE001 — a board never breaks a render
             pass
+    # RGBA pipeline: keep 4 channels — every frame on the ffmpeg pipe is
+    # rgba now (RGB values identical to the old convert("RGB") path; the
+    # opaque alpha byte is ignored by the encoder). Legacy 3ch callers
+    # (rgb was 3ch) keep the old RGB return for back-compat.
+    if rgb.ndim == 3 and rgb.shape[2] == 4:
+        return np.asarray(out)
     return np.asarray(out.convert("RGB"))
 
 

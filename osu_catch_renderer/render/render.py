@@ -1,6 +1,8 @@
 """Phase 1 orchestrator: parse -> simulate -> per-frame GL draw + HUD -> ffmpeg.
 
-Owns a small ffmpeg subprocess (raw rgb24 on stdin) so it stays decoupled
+Owns a small ffmpeg subprocess (raw rgba on stdin — RGBA zero-copy
+pipeline 2026-08-28; the alpha byte is GL garbage and ffmpeg ignores it)
+so it stays decoupled
 from osu_renderer's encode FIFO machinery. HUD text is composited on the CPU
 with PIL after GL readback — cheap and avoids a GL text pass for Phase 1.
 """
@@ -954,7 +956,11 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     if enc == "h264_vaapi" and dev:
         cmd += ["-vaapi_device", dev]
-    cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(cfg.fps),
+    # RGBA ZERO-COPY PIPELINE: the frame producer hands the GL readback
+    # buffer straight down the pipe (no 24<->32-bit repack). rgba input
+    # yields BIT-IDENTICAL yuv420p to rgb24 (verified with framemd5);
+    # the alpha byte is ignored by the encoder.
+    cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{w}x{h}", "-r", str(cfg.fps),
             "-i", "pipe:0"]
     # Loudnorm PCM cache (shared cross-engine; kill-switch R3D_NO_LOUDNORM_CACHE).
     # `prenorm` is a raw f32le@48k-stereo file with the rate/pitch change AND
@@ -1234,7 +1240,10 @@ class _Hud:
         self.f_small = _font(small)
 
     def overlay(self, rgb: np.ndarray, scene) -> np.ndarray:
-        img = Image.fromarray(rgb, "RGB")
+        # RGBA zero-copy canvas (fallback HUD): wrap the writable 4ch frame
+        # in place like DanserHud does; 3ch legacy input keeps the old copy.
+        from osu_catch_renderer.hud.hud import _img_from_rgb, _img_out
+        img = _img_from_rgb(rgb)
         d = ImageDraw.Draw(img)
         # combo bottom-left
         if scene.combo > 0:
@@ -1253,7 +1262,7 @@ class _Hud:
         bx, by, bw, bh = int(self.w * 0.30), int(self.h * 0.02), int(self.w * 0.40), 10
         d.rectangle([bx, by, bx + bw, by + bh], fill=(40, 40, 50))
         d.rectangle([bx, by, bx + int(bw * scene.hp), by + bh], fill=(120, 220, 140))
-        return np.asarray(img)
+        return _img_out(img)
 
 
 from osu_catch_renderer.hud.fonts import font as _font  # skin-aware, host-robust font resolver

@@ -126,9 +126,22 @@ def apply_death(rgb: "np.ndarray", p: float) -> "np.ndarray":
     d = -k * st
     e = k * ct
     fcoef = cy - k * (-st * cx + ct * (cy + ty))
+    # RGBA pipeline: `graded` may be HxWx4 (fromarray infers "RGBA"). PIL's
+    # BILINEAR resampling on RGBA is ALPHA-WEIGHTED (premultiplied) — with
+    # the canvas's GL-garbage alpha that skews the RGB result badly
+    # (measured maxdiff 247/255 vs the 3ch path). Forcing alpha opaque
+    # makes the premultiply a no-op, restoring the exact per-channel math
+    # of the RGB path; `graded` is a fresh array, so the mutation is safe.
+    # The opaque fill keeps the border blend identical too (a zero-alpha
+    # fill would zero the interpolated border RGB under premultiply).
+    if graded.shape[2] == 4:
+        graded[..., 3] = 255
+        fill = (0, 0, 0, 255)
+    else:
+        fill = (0, 0, 0)
     img = Image.fromarray(graded).transform(
         (w, h), Image.AFFINE, (a, b, c, d, e, fcoef),
-        resample=Image.BILINEAR, fillcolor=(0, 0, 0))
+        resample=Image.BILINEAR, fillcolor=fill)
     return np.asarray(img)
 
 

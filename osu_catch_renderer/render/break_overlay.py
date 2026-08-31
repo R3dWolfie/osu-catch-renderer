@@ -309,7 +309,9 @@ class LazerBreakOverlay:
             return
         sub = field[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0] * alpha
         box = (ix0, iy0, ix1, iy1)
-        base = np.asarray(img.crop(box), np.float32)
+        # RGBA canvas: force RGB — the additive field is 3-channel and the
+        # canvas alpha is GL garbage. Paste-back auto-converts (alpha=255).
+        base = np.asarray(img.crop(box).convert("RGB"), np.float32)
         out = np.clip(base + sub, 0.0, 255.0).astype(np.uint8)
         img.paste(Image.fromarray(out, "RGB"), box[:2])
 

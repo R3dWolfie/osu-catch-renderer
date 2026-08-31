@@ -813,8 +813,10 @@ class ArgonHud:
         elapsed / remaining info row."""
         es, lk = self.es, self.lk
         sx0, sx1, sy0, sy1 = self._sx0, self._sx1, self._sy0, self._sy1
+        # RGBA canvas: force RGB — the graph/pill blend terms are 3-channel
+        # and the canvas alpha is GL garbage. Paste-back auto-converts.
         region = np.asarray(
-            img.crop((sx0, sy0, sx1, sy1)), dtype=np.float32)
+            img.crop((sx0, sy0, sx1, sy1)).convert("RGB"), dtype=np.float32)
         # density graph — additive
         region += self._graph_add
         # bar background pill — over (precomputed constant terms; identical

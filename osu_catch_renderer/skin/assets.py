@@ -247,9 +247,14 @@ def catch_argon_droplet_rgba(v: int) -> np.ndarray:
 
 
 def catch_argon_droplet_hyper_rgba(v: int) -> np.ndarray:
-    """Droplet red hyper blob: IR0.5, a0.15, scale 0.7, shares blob-1 seed."""
+    """Droplet red hyper ring. Was scale 0.7 (== the droplet body) at a0.15,
+    which rendered INSIDE the droplet at ~15% opacity -> effectively invisible
+    (no "glow around it", forum bug 2026-08-31). Now a full-intensity blob at
+    0.85 (bigger than the 0.7 body, IR 0.08 like the fruit hyper), so the part
+    OUTSIDE the droplet reads as a bright red border ring -- the fruit hyper
+    treatment scaled to the droplet. Shares blob-1 seed."""
     s1, _ = _droplet_seeds(v)
-    return _to_white_rgba(0.15 * _blob_layer(0.7, 0.5, s1))
+    return _to_white_rgba(_blob_layer(0.85, 0.08, s1))
 
 
 def catch_argon_pip_rgba(n: int = ARGON_N) -> np.ndarray:
