@@ -90,13 +90,19 @@ class SpriteRenderer:
         # Honor R3D_EGL_DEVICE_INDEX so renders pin to the right GPU (pool
         # isolation: e.g. 1070=index 1 for Pool B). EGL ignores
         # CUDA_VISIBLE_DEVICES, so the device must be selected explicitly.
-        import os
-        dev = os.environ.get("R3D_EGL_DEVICE_INDEX", "").strip()
-        if dev.isdigit():
-            self.ctx = moderngl.create_context(
-                standalone=True, backend="egl", device_index=int(dev))
+        import os, sys
+        if sys.platform == "win32":
+            # Windows contributors: glcontext ships no EGL backend (ImportError
+            # cannot import name egl), so use the default WGL standalone context.
+            # R3D_EGL_DEVICE_INDEX is an EGL-only GPU pin (Linux pools).
+            self.ctx = moderngl.create_context(standalone=True)
         else:
-            self.ctx = moderngl.create_context(standalone=True, backend="egl")
+            dev = os.environ.get("R3D_EGL_DEVICE_INDEX", "").strip()
+            if dev.isdigit():
+                self.ctx = moderngl.create_context(
+                    standalone=True, backend="egl", device_index=int(dev))
+            else:
+                self.ctx = moderngl.create_context(standalone=True, backend="egl")
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
