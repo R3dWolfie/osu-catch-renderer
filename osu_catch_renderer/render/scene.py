@@ -1248,8 +1248,21 @@ class CatchSim:
                 start = _obj_rand01(obj.time_ms, obj.x, 1) * 0.349   # 0..20°
                 dur = self.preempt + 2000.0                          # map ms
                 rot = start + 12.566 * (t_ms - (obj.time_ms - self.preempt)) / dur
-            return self._base_overlay("fruit-drop", x, y, size,
-                                      self._combo_tint(obj.combo_index), rot)
+            tint = self._combo_tint(obj.combo_index)
+            out: list[Sprite] = []
+            if obj.hyperdash and self.cfg.show_hyperdash:
+                # Legacy hyper cue for DROPLETS: a red straight-alpha echo of
+                # the droplet art at 1.2x, drawn BEHIND the opaque base so it
+                # reads as a red ring. LegacyCatchHitObjectPiece.hyperSprite
+                # (Scale 1.2, Alpha 0.7, Colour red, Depth 1) applies to every
+                # catch piece, droplets included -- the fruit branch below does
+                # the same. Echo whichever art resolves (base preferred).
+                echo_key = "fruit-drop" if sk.has("fruit-drop") else "fruit-drop-overlay"
+                out.append(Sprite(x, y, size * 1.2, size * 1.2,
+                                  texture_key=echo_key,
+                                  color=(*self.hyper_fruit_rgb, 0.7), rotation=rot))
+            out.extend(self._base_overlay("fruit-drop", x, y, size, tint, rot))
+            return out
         if obj.kind is ObjType.BANANA:
             # Per-FILE fallthrough guard (Sofia render bug): legacy path when
             # ANY banana art resolves — a skin shipping ONLY the -overlay
