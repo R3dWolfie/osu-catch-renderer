@@ -1048,7 +1048,11 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         import fcntl
         F_SETPIPE_SZ = 1031
         fcntl.fcntl(proc.stdin.fileno(), F_SETPIPE_SZ, 1 << 20)
-    except OSError:
+    except (OSError, ImportError, AttributeError):
+        # fcntl + F_SETPIPE_SZ are Linux-only; on Windows contributors `import
+        # fcntl` raises ModuleNotFoundError (an ImportError, NOT OSError) which
+        # used to escape and crash EVERY catch render (exit 1). Skip the pipe-size
+        # optimization there -- the render is correct with the default pipe.
         pass
     proc._catch_errlog = errf.name  # type: ignore[attr-defined]
     return proc
