@@ -998,8 +998,12 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         # Resolution-scaled bitrate ladder (was flat 8M) -- R3D cross-engine
         # NVENC policy; see nvenc_target_bps above.
         _tgt = cfg.video_bitrate or nvenc_target_bps(w, h, cfg.fps)
+        # CQ23 quality-targeted VBR (quality-approved 2026-09-02): visually
+        # identical to the fixed-target ladder, ~17% smaller; the ladder is
+        # kept only as the -maxrate/-bufsize cap below.
         cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
-                "-b:v", str(_tgt), "-maxrate", str(int(_tgt * 1.5)),
+                "-rc", "vbr", "-cq", "23", "-b:v", "0",
+                "-maxrate", str(int(_tgt * 1.5)),
                 "-bufsize", str(_tgt * 2)]
     else:
         if cfg.video_bitrate:
