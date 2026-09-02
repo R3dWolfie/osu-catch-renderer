@@ -1858,7 +1858,8 @@ _LAZER_RESULTS: dict = {}
 
 
 def draw_results(rgb, meta, bm, opacity: float, board=None, age_ms=None,
-                 osu_path=None, sim=None, pp_override=None, sr_override=None):
+                 osu_path=None, sim=None, pp_override=None, sr_override=None,
+                 rate_override=None):
     """The osu!catch RESULTS SCREEN — the osu!(lazer) ranking screen, the
     faithful port of the std renderer's render/lazer_results.py (owner spec
     2026-07: results-screen parity with std). The screen itself lives in
@@ -1882,7 +1883,8 @@ def draw_results(rgb, meta, bm, opacity: float, board=None, age_ms=None,
             scr = CatchLazerResults((rgb.shape[1], rgb.shape[0]), meta, bm,
                                     board=board, osu_path=osu_path, sim=sim,
                                     pp_override=pp_override,
-                                    sr_override=sr_override)
+                                    sr_override=sr_override,
+                                    rate_override=rate_override)
             _LAZER_RESULTS[key] = scr
         if scr is False:                    # earlier bake failed → legacy
             return _draw_results_legacy(rgb, meta, bm, opacity, board=board)

@@ -84,6 +84,15 @@ def mods_score_multiplier(mods: int) -> float:
     # pushing scores past the 1e6 max). Same for DC=HT|DC if ever present.
     if mods & (1 << 9):        # NC set → clear implied DT
         mods &= ~(1 << 6)
+    # ScoreV2 (1<<29): under V2 lazer applies NO NF or HD multiplier --
+    # CatchLegacyScoreSimulator.GetLegacyScoreMultiplier:
+    #   case CatchModNoFail: multiplier *= scoreV2 ? 1.0 : 0.5;
+    #   case CatchModHidden: multiplier *= scoreV2 ? 1.0 : 1.06;
+    # Without this a stable NF+V2 play simmed to ~half the 1M-standardised
+    # header, tripping score_fidelity's sanity gate and shipping the halved
+    # sim as score_v3.
+    if mods & (1 << 29):
+        mods &= ~((1 << 0) | (1 << 3))
     m = 1.0
     for bit, mult in _MOD_SCORE_MULT.items():
         if mods & bit:
@@ -915,7 +924,7 @@ class CatchSim:
         s.counts = cp.counts
         return s
 
-    def compute_pp_curve(self, osu_path, mods) -> None:
+    def compute_pp_curve(self, osu_path, mods, clock_rate=None) -> None:
         """Fill each checkpoint's running pp via rosu-pp (no-op if unavailable)."""
         try:
             import rosu_pp_py as rosu
@@ -959,11 +968,16 @@ class CatchSim:
             cp = cps[i]
             c3, c1, c5, tmiss, miss = cp.counts
             try:
-                samples[i] = rosu.Performance(
+                _perf = rosu.Performance(
                     mods=int(mods), passed_objects=max(1, passed[i]),
                     n300=c3, n100=c1,
                     n50=c5, n_katu=tmiss, misses=miss, combo=cp.max_combo,
-                ).calculate(rbm).pp
+                )
+                if clock_rate is not None:
+                    # --rate: the play's TRUE clock rate overrides the
+                    # mods-derived rate (lazer rate-adjust).
+                    _perf.set_clock_rate(float(clock_rate))
+                samples[i] = _perf.calculate(rbm).pp
             except Exception:
                 samples[i] = samples.get(i - step, 0.0)
         # final point = the authoritative full-play pp, taken straight from
@@ -972,10 +986,13 @@ class CatchSim:
         m = self.meta
         if m is not None:
             try:
-                samples[n - 1] = rosu.Performance(
+                _perf = rosu.Performance(
                     mods=int(mods), n300=m.count_300, n100=m.count_100,
                     n50=m.count_50, n_katu=m.count_katu, misses=m.count_miss,
-                    combo=m.max_combo).calculate(rbm).pp
+                    combo=m.max_combo)
+                if clock_rate is not None:
+                    _perf.set_clock_rate(float(clock_rate))
+                samples[n - 1] = _perf.calculate(rbm).pp
             except Exception:
                 pass
         keys = sorted(samples)

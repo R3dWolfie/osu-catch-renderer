@@ -246,7 +246,8 @@ def render_catch(
             efr, emt = parse_replay(Path(extra))
             overlay_extra.append((efr, emt, getattr(emt, "player_name", "P")))
     osu_path = _find_osu(beatmap_dir, meta.beatmap_md5)
-    bm = parse_beatmap(osu_path, mods=meta.mods)
+    bm = parse_beatmap(osu_path, mods=meta.mods,
+                       rate_override=getattr(cfg, "rate_override", None))
     if not bm.objects:
         raise CatchRenderError(f"no hit objects parsed from {osu_path.name}")
     audio = bm.audio_filename and (beatmap_dir / bm.audio_filename)
@@ -490,7 +491,8 @@ def render_core(
                   f"{_sf_e}", file=_sfsys.stderr, flush=True)
             score_fid = None
     if cfg.show_pp_counter and osu_path is not None:
-        sim.compute_pp_curve(osu_path, meta.mods)
+        sim.compute_pp_curve(osu_path, meta.mods,
+                             clock_rate=getattr(cfg, "rate_override", None))
     preempt = ar_to_preempt_ms(bm.ar)
     first = bm.objects[0].time_ms
     last = min(last_obj, int(death_ms)) if failed else last_obj
@@ -743,7 +745,9 @@ def render_core(
                                 lg, meta, bm, op, board=baked_board,
                                 age_ms=age, osu_path=osu_path, sim=sim,
                                 pp_override=cfg.pp_override,
-                                sr_override=cfg.sr_override)
+                                sr_override=cfg.sr_override,
+                                rate_override=getattr(
+                                    cfg, "rate_override", None))
 
                         comp.push(("r", _results_frame, None))
                     else:
@@ -994,8 +998,12 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         # Resolution-scaled bitrate ladder (was flat 8M) -- R3D cross-engine
         # NVENC policy; see nvenc_target_bps above.
         _tgt = cfg.video_bitrate or nvenc_target_bps(w, h, cfg.fps)
+        # CQ23 quality-targeted VBR (quality-approved 2026-09-02): visually
+        # identical to the fixed-target ladder, ~17% smaller; the ladder is
+        # kept only as the -maxrate/-bufsize cap below.
         cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
-                "-b:v", str(_tgt), "-maxrate", str(int(_tgt * 1.5)),
+                "-rc", "vbr", "-cq", "23", "-b:v", "0",
+                "-maxrate", str(int(_tgt * 1.5)),
                 "-bufsize", str(_tgt * 2)]
     else:
         if cfg.video_bitrate:

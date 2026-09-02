@@ -823,7 +823,7 @@ def _bake_area_chart(values: list, w: int, h: int,
 
 # --- data helpers --------------------------------------------------------------------
 
-def _compute_stars_pp(osu_path, mods: int, meta):
+def _compute_stars_pp(osu_path, mods: int, meta, clock_rate=None):
     """(stars, pp, max_pp) via rosu-pp with the Catch-ruleset conversion (the
     same path scene.compute_pp_curve uses). `max_pp` = the perfect-play (SS)
     pp for the stage-2 PERFORMANCE footer. Fail-soft → (None, None, None)."""
@@ -839,22 +839,33 @@ def _compute_stars_pp(osu_path, mods: int, meta):
             pass
         stars = None
         try:
-            stars = float(rosu.Difficulty(mods=int(mods)).calculate(rbm).stars)
+            _diff = rosu.Difficulty(mods=int(mods))
+            if clock_rate is not None:
+                # --rate: the play's TRUE clock rate (lazer rate-adjust)
+                # overrides the mods-derived rate.
+                _diff.set_clock_rate(float(clock_rate))
+            stars = float(_diff.calculate(rbm).stars)
         except Exception:  # noqa: BLE001 — stars are optional
             stars = None
         pp = None
         try:
-            pp = float(rosu.Performance(
+            _perf = rosu.Performance(
                 mods=int(mods), n300=meta.count_300, n100=meta.count_100,
                 n50=meta.count_50, n_katu=meta.count_katu,
                 misses=meta.count_miss, combo=meta.max_combo,
-            ).calculate(rbm).pp)
+            )
+            if clock_rate is not None:
+                _perf.set_clock_rate(float(clock_rate))
+            pp = float(_perf.calculate(rbm).pp)
         except Exception:  # noqa: BLE001 — pp is optional
             pp = None
         max_pp = None
         try:
             # no hitresults → rosu assumes a perfect play (the SS ceiling)
-            max_pp = float(rosu.Performance(mods=int(mods)).calculate(rbm).pp)
+            _perf = rosu.Performance(mods=int(mods))
+            if clock_rate is not None:
+                _perf.set_clock_rate(float(clock_rate))
+            max_pp = float(_perf.calculate(rbm).pp)
         except Exception:  # noqa: BLE001 — the ceiling is optional
             max_pp = None
         return stars, pp, max_pp
@@ -862,7 +873,7 @@ def _compute_stars_pp(osu_path, mods: int, meta):
         return None, None, None
 
 
-def _compute_strains(osu_path, mods: int) -> list[float]:
+def _compute_strains(osu_path, mods: int, clock_rate=None) -> list[float]:
     """The rosu-pp MOVEMENT strain curve (catch's single skill) — map
     difficulty over time, the stage-2 COMBO panel's fallback chart when the
     sim's combo series isn't available. Fail-soft → []."""
@@ -876,7 +887,10 @@ def _compute_strains(osu_path, mods: int) -> list[float]:
                 rbm.convert(rosu.GameMode.Catch, int(mods))
         except Exception:  # noqa: BLE001 — conversion refusal → raw map
             pass
-        vals = list(rosu.Difficulty(mods=int(mods)).strains(rbm).movement
+        _diff = rosu.Difficulty(mods=int(mods))
+        if clock_rate is not None:
+            _diff.set_clock_rate(float(clock_rate))
+        vals = list(_diff.strains(rbm).movement
                     or [])
         return [float(v) for v in vals if v == v]      # drop NaNs
     except Exception:  # noqa: BLE001 — no rosu / no strains → no chart
@@ -935,7 +949,8 @@ class CatchLazerResults:
     frame on catch's CPU compositor, then caches the settled frame."""
 
     def __init__(self, resolution, meta, bm, board=None, osu_path=None,
-                 sim=None, pp_override=None, sr_override=None):
+                 sim=None, pp_override=None, sr_override=None,
+                 rate_override=None):
         self.W, self.H = int(resolution[0]), int(resolution[1])
         self.k = self.H / UH
         self.meta = meta
@@ -956,6 +971,7 @@ class CatchLazerResults:
         self._score_img = None
         self._score_val = -1
         self._osu_path = osu_path
+        self._rate_override = rate_override
 
         # --- results data (the replay's authoritative counts) ---------------
         caught = meta.count_300 + meta.count_100 + meta.count_50
@@ -971,7 +987,7 @@ class CatchLazerResults:
         # missed tinies stay visible via the DROPLET caught/total cell below.
         self.miss_display = meta.count_miss
         self.stars, self.pp, self.max_pp = _compute_stars_pp(
-            osu_path, meta.mods, meta)
+            osu_path, meta.mods, meta, clock_rate=rate_override)
         # --pp: pin the results-card PP to the EXACT official pp passed by
         # the service (RenderConfig.pp_override), overriding the rosu
         # estimate. Every results PP consumer reads self.pp -- the PP grid
@@ -1201,7 +1217,8 @@ class CatchLazerResults:
                 f"break{'' if len(breaks) == 1 else 's'}",
                 int(18 * k), foot_col)
         else:
-            strains = _compute_strains(self._osu_path, int(m.mods or 0))
+            strains = _compute_strains(self._osu_path, int(m.mods or 0),
+                                       clock_rate=self._rate_override)
             if len(strains) >= 4:
                 self.combo_title = bake_text("DIFFICULTY", int(22 * k),
                                              title_col)
