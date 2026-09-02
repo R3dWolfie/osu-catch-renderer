@@ -246,7 +246,8 @@ def render_catch(
             efr, emt = parse_replay(Path(extra))
             overlay_extra.append((efr, emt, getattr(emt, "player_name", "P")))
     osu_path = _find_osu(beatmap_dir, meta.beatmap_md5)
-    bm = parse_beatmap(osu_path, mods=meta.mods)
+    bm = parse_beatmap(osu_path, mods=meta.mods,
+                       rate_override=getattr(cfg, "rate_override", None))
     if not bm.objects:
         raise CatchRenderError(f"no hit objects parsed from {osu_path.name}")
     audio = bm.audio_filename and (beatmap_dir / bm.audio_filename)
@@ -490,7 +491,8 @@ def render_core(
                   f"{_sf_e}", file=_sfsys.stderr, flush=True)
             score_fid = None
     if cfg.show_pp_counter and osu_path is not None:
-        sim.compute_pp_curve(osu_path, meta.mods)
+        sim.compute_pp_curve(osu_path, meta.mods,
+                             clock_rate=getattr(cfg, "rate_override", None))
     preempt = ar_to_preempt_ms(bm.ar)
     first = bm.objects[0].time_ms
     last = min(last_obj, int(death_ms)) if failed else last_obj
@@ -743,7 +745,9 @@ def render_core(
                                 lg, meta, bm, op, board=baked_board,
                                 age_ms=age, osu_path=osu_path, sim=sim,
                                 pp_override=cfg.pp_override,
-                                sr_override=cfg.sr_override)
+                                sr_override=cfg.sr_override,
+                                rate_override=getattr(
+                                    cfg, "rate_override", None))
 
                         comp.push(("r", _results_frame, None))
                     else:

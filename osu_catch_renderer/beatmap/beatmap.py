@@ -30,7 +30,8 @@ class BeatmapParseError(RuntimeError):
 
 
 def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False,
-                  position_offsets: bool = True) -> CatchBeatmap:
+                  position_offsets: bool = True,
+                  rate_override: float | None = None) -> CatchBeatmap:
     text = path.read_text(encoding="utf-8", errors="replace")
     sections = _split_sections(text)
 
@@ -63,7 +64,14 @@ def parse_beatmap(path: Path, *, mods: int = 0, lazer: bool = False,
     # (done in render.py), which is what makes a DT play look/sound sped up.
     dt = bool(mods & (1 << 6)) or bool(mods & (1 << 9))  # DoubleTime or Nightcore
     ht = bool(mods & (1 << 8))                            # HalfTime
-    rate = 1.5 if dt else (0.75 if ht else 1.0)
+    if rate_override is not None:
+        # --rate: the play's TRUE clock rate (lazer rate-adjust, e.g. DT at
+        # 1.16x) -- overrides the full-mod bitmask rate. The stable bitmask
+        # can only say "DT" (1.5) or "HT" (0.75); a lazer play at a custom
+        # rate would otherwise render + score at the wrong speed.
+        rate = float(rate_override)
+    else:
+        rate = 1.5 if dt else (0.75 if ht else 1.0)
 
     timing = _parse_timing(sections.get("TimingPoints", ""))
     # osu!catch position offsets — CatchBeatmapProcessor.ApplyPositionOffsets

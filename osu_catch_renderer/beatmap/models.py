@@ -175,6 +175,14 @@ class RenderConfig:
     # (no live SR counter). Mirrors pp_override -- see
     # lazer_results.CatchLazerResults.
     sr_override: float | None = None
+    # TRUE clock-rate multiplier of the play (supplied by the service via
+    # --rate, e.g. 1.16 for a lazer rate-adjust play). When set it overrides
+    # the mods-bitmask rate for BOTH the render timing + audio atempo
+    # (parse_beatmap rate_override) AND the rosu pp/SR clock rate
+    # (set_clock_rate). None -> derive the rate from the mods bitmask as
+    # before (DT/NC=1.5, HT=0.75, else 1.0) -- byte-identical to the old
+    # behaviour.
+    rate_override: float | None = None
     watermark: str = ""                # bottom-right branding (free renders forced to site URL)
     # audio (0..100 from preset; 100 = unchanged)
     music_volume: int = 100

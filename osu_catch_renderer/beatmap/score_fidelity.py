@@ -372,6 +372,7 @@ def compute_candidates(meta, objects, osu_path, new_mod_multiplier: float) -> di
         "osu_facts": facts,
         "game_version": gv,
         "header_score": header,
+        "mods": int(getattr(meta, "mods", 0) or 0),
     }
 
 
@@ -398,6 +399,18 @@ def resolve_authoritative(fid: dict, sim_final: int) -> tuple[int, str]:
     """
     gv = int(fid.get("game_version", 0) or 0)
     ref = max(1, int(sim_final))
+    # ScoreV2 play: the header IS the standardised total already --
+    # StandardisedScoreMigrationTools keeps a ScoreV2 TotalScore unchanged
+    # (`if (mods.Any(mod => mod is ModScoreV2)) return (..., score.TotalScore)`)
+    # and stable_to_standardised mirrors that (returns the header as-is). It
+    # needs no sim-proximity sanity gate: the sim is an estimate, the V2
+    # header is the real standardised number. (Before the mods_score_multiplier
+    # V2 fix, an NF+V2 play simmed to ~half and the 50% gate here rejected the
+    # exact header, shipping the halved sim as score_v3.)
+    if int(fid.get("mods", 0) or 0) & _SCORE_V2:
+        val = fid["candidates"].get("stable_v1")
+        if val is not None and val >= 0:
+            return int(val), "stable_v1"
     if gv < LAZER_GAME_VERSION_BOUNDARY:
         val = fid["candidates"].get("stable_v1")
         if val is not None and val >= 0:
