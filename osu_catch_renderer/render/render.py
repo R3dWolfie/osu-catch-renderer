@@ -988,23 +988,49 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
 
     # video codec + pixel path
     if enc == "h264_vaapi":
-        _vb = str(cfg.video_bitrate) if cfg.video_bitrate else "8M"
-        cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", _vb]
+        if cfg.video_bitrate:
+            cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+                    "-b:v", str(cfg.video_bitrate)]
+        else:
+            # CQ23 quality target (#87 R3D size policy): quality-based
+            # encode is ~3-4x smaller than the flat 8M on osu gameplay,
+            # which shrinks the node->coordinator upload (the real
+            # "Finalizing" cost). VAAPI CQP is driver-dependent -> Aussie
+            # to validate on AMD before the fleet bundle.
+            cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+                    "-rc_mode", "CQP", "-qp", "23"]
     elif enc == "h264_nvenc":
-        # Resolution-scaled bitrate ladder (was flat 8M) -- R3D cross-engine
-        # NVENC policy; see nvenc_target_bps above.
-        _tgt = cfg.video_bitrate or nvenc_target_bps(w, h, cfg.fps)
-        cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
-                "-b:v", str(_tgt), "-maxrate", str(int(_tgt * 1.5)),
-                "-bufsize", str(_tgt * 2)]
+        if cfg.video_bitrate:
+            # Explicit override -> honor the bitrate target exactly.
+            _tgt = int(cfg.video_bitrate)
+            cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
+                    "-b:v", str(_tgt), "-maxrate", str(int(_tgt * 1.5)),
+                    "-bufsize", str(_tgt * 2)]
+        else:
+            # CQ23 quality target (#87 R3D size policy): -cq 23 with the
+            # resolution ladder as a maxrate CAP. On osu gameplay this
+            # lands ~3-4x under the flat bitrate -> much smaller masters
+            # -> faster node->coordinator upload (the "Finalizing" cost).
+            _cap = nvenc_target_bps(w, h, cfg.fps)
+            cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
+                    "-rc", "vbr", "-cq", "23", "-b:v", "0",
+                    "-maxrate", str(_cap), "-bufsize", str(_cap * 2)]
     else:
+        # CPU-encode thread cap (R3D host-governance, 2026-09): leave >=2
+        # logical cores free for the machine's owner. Uncapped, libx264 spawns
+        # threads on EVERY core at normal priority and can freeze a
+        # contributor's desktop (the rel/Stella "semi-crash"). Harmless on
+        # dedicated render boxes: libx264 is only the no-HW-encoder fallback.
+        # Same cap in all four engines (catch/taiko/std/mania v2).
+        _thr = ["-threads", str(max(2, (os.cpu_count() or 4) - 2))]
         if cfg.video_bitrate:
             _vb = int(cfg.video_bitrate)
             cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                     "-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
-                    "-bufsize", str(_vb * 2)]
+                    "-bufsize", str(_vb * 2)] + _thr
         else:
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", "20"]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-crf", "23"] + _thr
 
     if audio is not None:
         # `prenorm` -> canonical builders (rate/pitch + loudnorm are baked into
@@ -1030,7 +1056,7 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                                pre_normalized=pre)
             if af:
                 cmd += ["-af", af]
-        cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+        cmd += ["-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-shortest"]
 
     # web-streamable: move the moov atom to the front so browsers/iOS can
     # play before the whole file downloads (loudnorm re-adds this, but be

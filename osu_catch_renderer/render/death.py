@@ -216,7 +216,8 @@ def apply_fail_audio(output_path: "Path | str", death_video_s: float,
              "-i", str(output_path),
              "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "pipe:0",
              "-map", "0:v:0", "-map", "1:a:0",
-             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
+             "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "192k",
+             "-shortest",
              str(tmp)],
             input=A.astype("<f4").tobytes(), capture_output=True)
         if mux.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 8000:

@@ -95,6 +95,21 @@ class CatchSim:
     def __init__(self, beatmap: CatchBeatmap, frames: list[CatchFrame], cfg: RenderConfig,
                  skin=None, has_bg: bool = False, meta=None,
                  end_ms: int | None = None):
+        # Mirror detection (see _maybe_apply_mirror) BEFORE any object-derived
+        # state is built, so a flipped playfield is consistent everywhere
+        # (sim, draw, obj-index). Distances are flip-invariant so hyperdash
+        # marking is unaffected. CRITICAL (Aussie release-gate fix 2026-09-06):
+        # it returns a PER-SIM beatmap — a copy with flipped objects when it
+        # fires, else the input unchanged — and must NEVER mutate the shared
+        # beatmap in place. render_core hands the same CatchBeatmap to the
+        # primary sim AND every versus-overlay sim; an in-place flip by a
+        # Mirror primary would corrupt the geometry a following stable/Nomod
+        # overlay then builds against. We rebind `beatmap` (used for all the
+        # object-derived state below) and self.bm to the returned copy.
+        try:
+            beatmap = self._maybe_apply_mirror(beatmap, frames, meta)
+        except Exception:
+            pass
         self.bm = beatmap
         self.kiai_ranges = getattr(beatmap.timing, "kiai", []) if beatmap.timing is not None else []
         self.frames = frames
@@ -230,6 +245,93 @@ class CatchSim:
     # lazer combo-portion log accumulation constants (CatchScoreProcessor)
     _COMBO_BASE = 4
     _COMBO_CAP = 200
+
+    def _maybe_apply_mirror(self, beatmap, frames, meta):
+        """lazer\'s Mirror mod flips the catch playfield horizontally (x -> 512-x),
+        but lazer stores its mods in a block osrparse does not expose -- the stable
+        mods bitfield reads 0 -- so without this we place every fruit on the wrong
+        side and the recorded catcher \'catches nothing\' (~100% geometry/.osr
+        disagreement -> the honesty guard false-rejects a legit replay). Detect it
+        the same way _calibrate_offset detects a constant time shift: if flipping x
+        makes the RECORDED catcher align far better than the un-flipped layout, the
+        player used Mirror -- apply the flip to every object. A horizontal flip
+        preserves inter-fruit distances, so hyperdash marking is unaffected; only
+        absolute positions (catch test + draw) change, which is exactly right.
+        Guarded to only fire on an overwhelming signal, so a normal replay (which
+        already aligns un-flipped) is never touched.
+
+        OWNERSHIP (Aussie release-gate fix 2026-09-06): NON-MUTATING. render_core
+        hands the SAME CatchBeatmap to the primary sim and every versus-overlay
+        sim; flipping ``beatmap.objects`` in place corrupted the geometry a
+        following stable/Nomod overlay then built against. This now RETURNS the
+        per-sim beatmap to use — a shallow copy carrying its OWN flipped objects
+        list when Mirror fires, or the input beatmap unchanged otherwise — and
+        never touches the caller's objects list. The constructor rebinds to the
+        return value; callers that ignore it get the old (safe) no-op semantics
+        on a non-mirror replay.
+        """
+        import sys as _sys
+        import copy as _copy
+        from dataclasses import replace as _replace
+        from osu_catch_renderer.beatmap.replay import catcher_x_at
+        if len(frames) < 50 or not beatmap.objects:
+            return beatmap
+        # Catch Mirror is a LAZER-only mod (CatchModMirror). Stable Catch
+        # geometry can never legitimately be mirror-configured, so never let
+        # this heuristic flip a stable replay's geometry. lazer legacy
+        # export version is >= 30000000.
+        if int(getattr(meta, "game_version", 0) or 0) < 30000000:
+            return beatmap
+        half = cs_to_catcher_half_width(beatmap.cs)
+        span_end = frames[-1].time_ms
+        objs = [o for o in beatmap.objects
+                if o.kind is not ObjType.BANANA and o.time_ms <= span_end]
+        if len(objs) > 1500:
+            objs = objs[:: (len(objs) // 1500) + 1]
+        if len(objs) < 60:
+            return beatmap
+
+        def _rate(mirror: bool) -> float:
+            hit = 0
+            for o in objs:
+                cx, _ = catcher_x_at(frames, o.time_ms)
+                ox = (512.0 - o.x) if mirror else o.x
+                if abs(cx - ox) <= half:
+                    hit += 1
+            return hit / len(objs)
+
+        base = _rate(False)
+        if base >= 0.5:            # already aligns un-flipped -> not mirrored
+            return beatmap
+        mir = _rate(True)
+        if not (mir >= 0.85 and (mir - base) >= 0.30):
+            return beatmap
+        try:
+            def _flip(o):
+                kw = {"x": 512.0 - o.x}
+                htx = getattr(o, "hyper_target_x", None)
+                if htx is not None:
+                    # hyper_target_x is an ABSOLUTE playfield coord (where
+                    # the catcher must reach to complete the hyperdash) --
+                    # mirror it too, else the hyperdash glow/termination
+                    # timing lands on the wrong side.
+                    kw["hyper_target_x"] = 512.0 - htx
+                return _replace(o, **kw)
+            flipped = [_flip(o) for o in beatmap.objects]
+        except Exception:
+            return beatmap
+        # PER-SIM COPY: a shallow copy of the beatmap carrying its OWN flipped
+        # objects list. Every other field (timing, breaks, cs/ar, combo colours)
+        # is flip-invariant and safely shared by reference; only .objects — the
+        # one thing the flip changes — is replaced, and the caller's list is
+        # left untouched. copy.copy keeps this generic (no dataclass-only
+        # dependency) so the detector works on any beatmap-shaped object.
+        mirrored = _copy.copy(beatmap)
+        mirrored.objects = flipped
+        print(f"[catch] Mirror detected (catcher align {base*100:.0f}% -> "
+              f"{mir*100:.0f}%); flipped playfield (lazer Mirror mod is not "
+              f"in the stable mods field)", file=_sys.stderr, flush=True)
+        return mirrored
 
     def _calibrate_offset(self) -> None:
         """A handful of catch replays carry a constant timeline shift vs the
