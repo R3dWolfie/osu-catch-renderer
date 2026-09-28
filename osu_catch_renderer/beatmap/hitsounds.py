@@ -49,6 +49,8 @@ import sys
 import zlib
 from pathlib import Path
 
+from osu_catch_renderer.security import ffmpeg_file_input_args
+
 import numpy as np
 
 SAMPLE_RATE = 44100
@@ -80,7 +82,7 @@ def _decode_pcm(path: Path) -> np.ndarray | None:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         return None
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path),
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", *ffmpeg_file_input_args(path),
            "-f", "f32le", "-acodec", "pcm_f32le",
            "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS), "pipe:1"]
     try:

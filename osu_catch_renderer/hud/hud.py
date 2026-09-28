@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from osu_catch_renderer.security import safe_skin_file
+
 log = logging.getLogger(__name__)
 
 # osu mod bit -> selection-mod-<name>. Nightcore (512) supersedes DT; Perfect (16384) supersedes SD.
@@ -1593,17 +1595,9 @@ class DanserHud:
             if root is None:
                 continue
             for stem in (f"{base}@2x", base):
-                p = root / f"{stem}.png"
-                if p.is_file():
+                p = safe_skin_file(root, f"{stem}.png")
+                if p is not None:
                     return p
-                # Case-insensitive fallback: osu skins are case-blind (Windows),
-                # but our filesystem isn't — e.g. skin.ini ComboPrefix "combo" vs
-                # files named "Combo-0.png". Scan the parent dir case-blind.
-                parent, want = p.parent, p.name.lower()
-                if parent.is_dir():
-                    for f in parent.iterdir():
-                        if f.name.lower() == want:
-                            return f
         return None
 
     def _load_native(self, base: str, *, default_ok: bool = True):

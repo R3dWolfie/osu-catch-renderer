@@ -92,9 +92,11 @@ def load_layout(skin_dir) -> dict[str, Component]:
     if not p.is_file():
         return {}
     try:
+        if p.stat().st_size > 512 * 1024:
+            return {}
         data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
         info = data.get("DrawableInfo") or {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     out: dict[str, Component] = {}
     for section in CATCH_SECTIONS:

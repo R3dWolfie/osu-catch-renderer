@@ -26,6 +26,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from osu_catch_renderer.security import ffmpeg_file_input_args
+
 # The loudnorm param string. MUST stay byte-identical to the sibling engines
 # (mania encode.py LOUDNORM / osu-std _LOUDNORM_FILTER) and to the literal used
 # in render._audio_filter / _hitsound_filter_complex, or the shared cache key
@@ -110,7 +112,7 @@ def _build(source: Path, rate: float, pitch: bool, target: Path) -> bool:
         os.close(fd)
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", str(source),
+            *ffmpeg_file_input_args(source),
             "-vn", "-af", af,
             "-f", "f32le", "-acodec", "pcm_f32le",
             "-ar", str(LOUDNORM_CACHE_SR), "-ac", str(LOUDNORM_CACHE_CH),

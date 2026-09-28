@@ -34,6 +34,7 @@ from osu_catch_renderer.render import loudnorm_cache
 from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms, ObjType
 from osu_catch_renderer.beatmap.replay import parse_replay
 from osu_catch_renderer.render.scene import CatchSim, mods_score_multiplier
+from osu_catch_renderer.security import ffmpeg_file_input_args, safe_related_file
 
 
 class CatchRenderError(RuntimeError):
@@ -249,10 +250,8 @@ def render_catch(
     bm = parse_beatmap(osu_path, mods=meta.mods)
     if not bm.objects:
         raise CatchRenderError(f"no hit objects parsed from {osu_path.name}")
-    audio = bm.audio_filename and (beatmap_dir / bm.audio_filename)
-    audio = audio if (audio and audio.is_file()) else None
-    bg = bm.background and (beatmap_dir / bm.background)
-    bg = bg if (bg and bg.is_file()) else None
+    audio = safe_related_file(beatmap_dir, bm.audio_filename)
+    bg = safe_related_file(beatmap_dir, bm.background)
     # replay md5 → so the results-screen leaderboard can exclude THIS render's
     # own DB row from the flanks (mirrors the std renderer).
     try:
@@ -980,9 +979,9 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             cmd += ["-f", "f32le",
                     "-ar", str(loudnorm_cache.LOUDNORM_CACHE_SR),
                     "-ac", str(loudnorm_cache.LOUDNORM_CACHE_CH),
-                    "-i", str(prenorm)]
+                    *ffmpeg_file_input_args(prenorm)]
         else:
-            cmd += ["-i", str(audio)]
+            cmd += ffmpeg_file_input_args(audio)
         if hitsound_wav is not None:
             cmd += ["-i", str(hitsound_wav)]
 

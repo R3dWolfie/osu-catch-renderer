@@ -13,6 +13,7 @@ from pathlib import Path
 from osrparse import Replay
 
 from osu_catch_renderer.beatmap.models import CatchFrame, ReplayMeta
+from osu_catch_renderer.security import bounded_lzma_decompress, validate_replay_payload
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345
@@ -153,8 +154,11 @@ def _raw_button_states(path: Path) -> list[int] | None:
         off += 8                       # timestamp
         rlen = struct.unpack_from("<i", data, off)[0]
         off += 4
-        raw = lzma.decompress(data[off:off + rlen],
-                              format=lzma.FORMAT_AUTO).decode("ascii", "replace")
+        if rlen < 0 or rlen > len(data) - off:
+            raise ValueError("invalid replay payload length")
+        raw = bounded_lzma_decompress(
+            data[off:off + rlen], format=lzma.FORMAT_AUTO
+        ).decode("ascii", "replace")
         out: list[int] = []
         groups = raw.rstrip(",").split(",")
         for i, group in enumerate(groups):
@@ -233,8 +237,11 @@ def _recover_leadin_offset(path: Path) -> int:
         off += 8                       # timestamp (int64)
         rlen = struct.unpack_from("<i", data, off)[0]
         off += 4                       # replay-data length (int32)
-        raw = lzma.decompress(data[off:off + rlen],
-                              format=lzma.FORMAT_AUTO).decode("ascii", "replace")
+        if rlen < 0 or rlen > len(data) - off:
+            raise ValueError("invalid replay payload length")
+        raw = bounded_lzma_decompress(
+            data[off:off + rlen], format=lzma.FORMAT_AUTO
+        ).decode("ascii", "replace")
 
         lead = 0
         for i, group in enumerate(raw.rstrip(",").split(",")):
@@ -259,6 +266,7 @@ def parse_replay(path: Path) -> tuple[list[CatchFrame], ReplayMeta]:
     if not path.exists():
         raise ReplayParseError(f"replay not found: {path}")
     try:
+        validate_replay_payload(path)
         r = Replay.from_path(path)
     except Exception as e:  # noqa: BLE001 - osrparse raises bare exceptions
         raise ReplayParseError(f"osrparse failed: {e}") from e
