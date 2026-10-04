@@ -1014,8 +1014,18 @@ def render_core(
             print(f"[catch-renderer] hitsounds skipped: {e}", file=sys.stderr)
             hits_wav = None
     _su_mark("storyboard+hitsounds")
+    # INLINE PREVIEW (R3D_PREVIEW_INLINE=1, default OFF): same contract as the GL
+    # path (render/render.py) -- the ffmpeg that encodes the master also writes
+    # the lean 720p30 preview embed as a second output, so it is finished the
+    # moment the render is. Single renders only.
+    preview_path = None
+    if os.environ.get("R3D_PREVIEW_INLINE") == "1" and not overlay_extra:
+        preview_path = output_path.parent / (output_path.stem + ".embed.mp4")
+        print(f"[catch] inline preview -> {preview_path.name}",
+              file=sys.stderr, flush=True)
     proc = _spawn_ffmpeg(cfg, output_path, audio, start_ms, rate, total_dur_s,
-                         hitsound_wav=hits_wav, is_nc=is_nc)
+                         hitsound_wav=hits_wav, is_nc=is_nc,
+                         preview_path=preview_path)
     # Argon is the DEFAULT skin: skinless renders stay all-Argon (parity with
     # the STD renderer). DanserHud now handles skin_dir=None; plain _Hud only if
     # DanserHud fails to build.
@@ -1847,9 +1857,21 @@ def nvenc_target_bps(w: int, h: int, fps: float) -> int:
     return int(min(16_000_000.0, max(2_500_000.0, target)))
 
 
+def _preview_video_bps(total_dur_s: "float | None") -> int:
+    """Video bitrate of the lean preview embed. Mirrors the contributor
+    client's makeEmbedVariant (and the bot's _transcode_embed_unbounded):
+    ~1.4 Mbps, lowered on long maps so the file stays <= ~24 MiB, floor 500k."""
+    vbps = 1_400_000
+    if total_dur_s and total_dur_s > 0:
+        vbps = int(24 * 1024 * 1024 * 8 / total_dur_s) - 128_000
+        vbps = max(500_000, min(1_400_000, vbps))
+    return vbps
+
+
 def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                   start_ms: int, rate: float = 1.0, total_dur_s: float | None = None,
-                  hitsound_wav: Path | None = None, is_nc: bool = False):
+                  hitsound_wav: Path | None = None, is_nc: bool = False,
+                  preview_path: "Path | None" = None):
     w, h = cfg.resolution
     enc, dev = _probe_encoder(cfg)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
@@ -1892,6 +1914,7 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             cmd += ["-i", str(hitsound_wav)]
 
     # video codec + pixel path
+    _v0 = len(cmd)          # master video args start here (inline preview)
     if enc == "h264_vaapi":
         _vb = str(cfg.video_bitrate) if cfg.video_bitrate else "8M"
         cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", _vb]
@@ -1970,7 +1993,9 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                     "-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
                     "-bufsize", str(_vb * 2)]
         else:
-            cmd += ["-c:v", "libx264", "-preset", _X264_PRESET, "-pix_fmt", "yuv420p", "-crf", "20"]
+            # crf 23 = the shipped GL path's value (R3D size policy #87). This
+            # backend forked before that change and was still on crf 20.
+            cmd += ["-c:v", "libx264", "-preset", _X264_PRESET, "-pix_fmt", "yuv420p", "-crf", "23"]
         # R3D_X264_PARAMS: extra -x264-params, ":"-joined. The preset ladder
         # is coarse -- veryfast to ultrafast is +32% end-to-end for 3.2x the
         # file -- so the useful points are between them: ultrafast with cabac
@@ -1986,6 +2011,7 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
         if _xt.isdigit():
             cmd += ["-threads", _xt]
 
+    _a0 = len(cmd)          # master audio args start here (inline preview)
     if audio is not None:
         # `prenorm` -> canonical builders (rate/pitch + loudnorm are baked into
         # the cached f32le input); else the original inline fused-loudnorm path.
@@ -2010,7 +2036,9 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
                                pre_normalized=pre)
             if af:
                 cmd += ["-af", af]
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
+        # -ar 48000 as on the GL path: without it the inline-loudnorm path
+        # (192 kHz internally) encodes a 96 kHz AAC master.
+        cmd += ["-c:a", "aac", "-ar", "48000", "-b:a", "192k"]
         # `-shortest` makes ffmpeg hold the audio output until it learns the
         # video length, which defers the ENTIRE audio filtergraph to after the
         # last video frame (~950 ms of dead time at 1080p; drops to 28 ms with
@@ -2037,6 +2065,67 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             cmd += ["-t", _tv if _tv else f"{total_dur_s:.6f}"]
         # "none" = neither (measurement only; leaves an AAC-granularity tail)
 
+    if preview_path is not None:
+        # TWO OUTPUTS FROM ONE PROCESS (port of the GL path's inline preview).
+        # Everything above built the master's args exactly as without the
+        # preview; take them back off `cmd` and re-emit them behind a
+        # filter_complex that `split`s the frame pipe (read ONCE) into the
+        # master encoder and a 720p30 libx264 preview, and `asplit`s the
+        # master's own audio graph, with the client's loudness pass on the
+        # preview branch only.
+        vc, aargs = cmd[_v0:_a0], cmd[_a0:]
+        del cmd[_v0:]
+        vm_tail = "null"
+        if "-vf" in vc:                 # vaapi: "-vf format=nv12,hwupload"
+            _i = vc.index("-vf")
+            vm_tail = vc[_i + 1]
+            vc = vc[:_i] + vc[_i + 2:]
+        pfps = min(30, int(round(float(cfg.fps))))
+        graph = [f"[0:v]split=2[vm0][vp0];[vm0]{vm_tail}[vm];"
+                 f"[vp0]scale=-2:720,fps={pfps}[vp]"]
+        atail: list = []
+        if audio is not None:
+            if aargs[:1] == ["-filter_complex"]:
+                # song + hitsounds: [graph, -map 0:v, -map [aout]] then codec
+                graph.append(aargs[1])
+                atail = aargs[6:]
+            elif aargs[:1] == ["-af"]:
+                graph.append(f"[1:a]{aargs[1]}[aout]")
+                atail = aargs[2:]
+            else:
+                graph.append("[1:a]anull[aout]")
+                atail = aargs
+            # PIN THE SHARED BRANCH BEFORE THE SPLIT when the master is a
+            # 48 kHz stream (loudnorm-cache path, or an explicit -ar 48000 --
+            # which the master now always has). The preview's loudnorm runs at
+            # 192 kHz and otherwise wins format negotiation back THROUGH asplit,
+            # so the master's own chain would run at 192 kHz and its audio bytes
+            # change.
+            _pin = ("aformat=sample_rates=48000,"
+                    if (prenorm is not None or "48000" in atail) else "")
+            graph.append(f"[aout]{_pin}asplit=2[am][ap0];"
+                         "[ap0]loudnorm=I=-18:TP=-1.5:LRA=11[ap]")
+        cmd += ["-filter_complex", ";".join(graph)]
+        # output 1: the master, args exactly as without the preview
+        cmd += ["-map", "[vm]"] + (["-map", "[am]"] if audio is not None else [])
+        cmd += vc + atail
+        if os.environ.get("R3D_NO_FASTSTART") != "1":
+            cmd += ["-movflags", "+faststart"]
+        cmd += [str(output_path)]
+        # output 2: the preview. libx264 always (a second HW session can fail
+        # to open and one failed output kills the render). Same tail rule as the
+        # master (-t / -shortest) so both files have the master's duration.
+        vbps = _preview_video_bps(total_dur_s)
+        _ptail = [x for x in atail[atail.index("192k") + 1:]] if "192k" in atail else []
+        cmd += ["-map", "[vp]"] + (["-map", "[ap]"] if audio is not None else [])
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-b:v", str(vbps), "-maxrate", str(int(vbps * 1.25)),
+                "-bufsize", str(vbps * 2), "-g", "30",
+                "-threads", str(max(2, min(4, (os.cpu_count() or 4) - 2)))]
+        if audio is not None:
+            cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"] + _ptail
+        cmd += ["-movflags", "+faststart", str(preview_path)]
+
     # web-streamable: move the moov atom to the front so browsers/iOS can
     # play before the whole file downloads (loudnorm re-adds this, but be
     # robust if that post-step is skipped/fails).
@@ -2044,9 +2133,10 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
     # the front (needed for progressive playback in browsers / Discord embeds).
     # R3D_NO_FASTSTART=1 is a measurement knob only -- dropping it breaks inline
     # playback, so it must not become the default.
-    if os.environ.get("R3D_NO_FASTSTART") != "1":
-        cmd += ["-movflags", "+faststart"]
-    cmd += [str(output_path)]
+    if preview_path is None:
+        if os.environ.get("R3D_NO_FASTSTART") != "1":
+            cmd += ["-movflags", "+faststart"]
+        cmd += [str(output_path)]
     import tempfile
     if os.environ.get("R3D_NULL_SINK") == "1":
         # `cat` drains stdin and discards: identical pipe/subprocess structure,
