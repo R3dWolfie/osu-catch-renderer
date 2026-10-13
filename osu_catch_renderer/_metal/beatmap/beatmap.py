@@ -173,9 +173,29 @@ class _Timing:
                 break
             if not uninh and val < 0:
                 mult = 100.0 / -val   # -100 => 1.0x, -50 => 2.0x
-            elif uninh:
+            elif uninh or math.isnan(val):
                 mult = 1.0
         return mult
+
+    def generate_ticks(self, t: float) -> bool:
+        """Legacy NaN green lines disable ticks, but retain 1x velocity.
+
+        At a shared timestamp the last green line overrides red lines,
+        regardless of their file order (LegacyBeatmapDecoder).
+        """
+        latest = None
+        enabled = True
+        for time, val, uninh in reversed(self.points):
+            if time > t:
+                continue
+            if latest is None:
+                latest = time
+            elif time != latest:
+                break
+            if not uninh:
+                return not math.isnan(val)
+            enabled = not math.isnan(val)
+        return enabled
 
 
 def _parse_timing(block: str) -> _Timing:
@@ -442,6 +462,7 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
     span_dur = length / velocity
     tick_distance = (100.0 * slider_mult * sv) / tick_rate if tick_rate > 0 else length
     tick_distance = max(0.0, min(tick_distance, length))
+    generate_ticks = timing.generate_ticks(time)
     min_from_end = velocity * 10.0
 
     # --- slider events in time order: head, ticks/repeats per span, tail ---
@@ -454,7 +475,7 @@ def _slider_objects(f, x0, time, combo_index, is_new, *, timing, slider_mult, ti
             ticks: list[tuple[float, float, str, int]] = []
             d = tick_distance
             _nt = 0
-            while d <= length - min_from_end and _nt < _MAX_TICKS_PER_SPAN:
+            while generate_ticks and d <= length - min_from_end and _nt < _MAX_TICKS_PER_SPAN:
                 pp = d / length
                 tp = (1.0 - pp) if rev else pp
                 ticks.append((span_start + tp * span_dur, pp, "tick", -1))
