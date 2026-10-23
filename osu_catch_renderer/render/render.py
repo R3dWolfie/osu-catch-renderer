@@ -33,6 +33,7 @@ from osu_catch_renderer.render.death import (FAIL_FADE_MS, apply_death,
 from osu_catch_renderer.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer.render.gl import SpriteRenderer
 from osu_catch_renderer import preview_hw as _phw
+from osu_catch_renderer import av1 as _av1
 from osu_catch_renderer.render import loudnorm_cache
 from osu_catch_renderer.beatmap.models import RenderConfig, ar_to_preempt_ms, ObjType
 from osu_catch_renderer.beatmap.replay import parse_replay
@@ -1117,9 +1118,18 @@ def render_core(
 # --- ffmpeg -------------------------------------------------------------------
 
 def _probe_encoder(cfg: RenderConfig) -> tuple[str, str | None]:
+    # AV1 master (opt-in: --encoder av1 / av1_vaapi / av1_nvenc / av1_amf /
+    # av1_qsv, or R3D_ENCODER). The `av1` auto selector REAL-probes the fleet's
+    # hardware AV1 backends (128x128 test-encode confirmed codec_name=av1) and
+    # fails closed if none works; an explicit av1_* backend passes through
+    # (trusting the coordinator's capability gate) and still fails closed at
+    # render time with no H.264/CPU fallback. Bare "auto" stays H.264 — flipping
+    # the fleet default to AV1 is a gated rollout decision carried per job.
+    if _av1.is_auto(cfg.encoder):
+        return _av1.resolve_encoder(cfg.encoder, cfg.encoder_device)
     if cfg.encoder != "auto":
-        # vaapi always needs a device for the hwupload filter; default it.
-        if cfg.encoder == "h264_vaapi":
+        # vaapi (h264 or av1) always needs a device for the hwupload filter.
+        if cfg.encoder == "h264_vaapi" or _av1.needs_vaapi_upload(cfg.encoder):
             return cfg.encoder, cfg.encoder_device or "/dev/dri/renderD128"
         return cfg.encoder, cfg.encoder_device
     # nvenc FIRST: R3D renders on NVIDIA (2070S / 1070). The old vaapi-first
@@ -1274,7 +1284,7 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
     w, h = cfg.resolution
     enc, dev = _probe_encoder(cfg)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-    if enc == "h264_vaapi" and dev:
+    if dev and (enc == "h264_vaapi" or _av1.needs_vaapi_upload(enc)):
         cmd += ["-vaapi_device", dev]
     # stream_master: the master gets the final loudness pass here and no
     # +faststart (see STREAM_LOUDNORM above). Default False = command unchanged.
@@ -1339,6 +1349,15 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             vc += ["-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p",
                     "-rc", "vbr", "-cq", "23", "-b:v", "0",
                     "-maxrate", str(_cap), "-bufsize", str(_cap * 2)]
+    elif _av1.is_explicit(enc):
+        # AV1 MASTER (8-bit 4:2:0, Main profile, backend-specific controls —
+        # see osu_catch_renderer/av1.py). vaapi carries "-vf format=nv12,hwupload"
+        # (stripped into the filter_complex graph on the two-output path below,
+        # exactly like h264_vaapi); nvenc/amf take yuv420p, qsv nv12. The inline
+        # preview + Discord compact stay H.264 and are untouched. Fail-closed:
+        # if this encode fails there is NO H.264/CPU fallback (ret!=0 raises).
+        vc += _av1.master_video_args(enc, w=w, h=h, fps=cfg.fps,
+                                     video_bitrate=cfg.video_bitrate)
     else:
         # CPU-encode thread cap (R3D host-governance, 2026-09): leave >=2
         # logical cores free for the machine's owner. Uncapped, libx264 spawns
@@ -1419,8 +1438,9 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
             preview_hw = False   # no known length to end the audio at: stay on x264
         _lead = ("," + _phw.vt_lead_in_filter(pfps)) if preview_hw else ""
         vm_tail = "null"
-        if enc == "h264_vaapi":
+        if enc == "h264_vaapi" or _av1.needs_vaapi_upload(enc):
             # the master's "-vf format=nv12,hwupload" moves into the graph
+            # (same for h264_vaapi and av1_vaapi)
             vm_tail = "format=nv12,hwupload"
             vc = [x for i, x in enumerate(vc)
                   if not (x == "-vf" or (i and vc[i - 1] == "-vf"))]

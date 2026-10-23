@@ -139,7 +139,7 @@ class ReplayMeta:
 class RenderConfig:
     resolution: tuple[int, int] = (1920, 1080)
     fps: int = 60
-    encoder: str = "auto"               # auto | h264_vaapi | h264_nvenc | libx264
+    encoder: str = "auto"               # H.264: auto|h264_vaapi|h264_nvenc|libx264 — AV1 master: av1|av1_vaapi|av1_nvenc|av1_amf|av1_qsv
     encoder_device: str | None = None   # e.g. /dev/dri/renderD128
     video_bitrate: int | None = None    # override the auto bitrate ladder (bps)
     skin_dir: Path | None = None        # user skin (extracted .osk dir, e.g. Night05)

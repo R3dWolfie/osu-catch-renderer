@@ -31,6 +31,7 @@ from osu_catch_renderer._metal.render.death import (FAIL_FADE_MS, apply_death,
 from osu_catch_renderer._metal.render.flashlight import CatchFlashlight, has_flashlight
 from osu_catch_renderer._metal.render.gl import SpriteRenderer
 from osu_catch_renderer import preview_hw as _phw
+from osu_catch_renderer import av1 as _av1
 from osu_catch_renderer._metal.render import loudnorm_cache
 from osu_catch_renderer._metal.beatmap.models import RenderConfig, ar_to_preempt_ms, ObjType
 from osu_catch_renderer._metal.beatmap.replay import parse_replay
@@ -1830,9 +1831,17 @@ def render_core(
 # --- ffmpeg -------------------------------------------------------------------
 
 def _probe_encoder(cfg: RenderConfig) -> tuple[str, str | None]:
+    # AV1 master — identical policy to the GL path (osu_catch_renderer/av1.py):
+    # the `av1` auto selector real-probes the hardware AV1 backends and fails
+    # closed if none works; explicit av1_* passes through (still fail-closed at
+    # render time, no H.264/CPU fallback). On Apple Silicon there is no hardware
+    # AV1 encoder, so `av1` auto fails closed here, which is the accepted loss of
+    # Mac nodes for AV1 work. Bare "auto" stays this path's existing H.264/VT.
+    if _av1.is_auto(cfg.encoder):
+        return _av1.resolve_encoder(cfg.encoder, cfg.encoder_device)
     if cfg.encoder != "auto":
-        # vaapi always needs a device for the hwupload filter; default it.
-        if cfg.encoder == "h264_vaapi":
+        # vaapi (h264 or av1) always needs a device for the hwupload filter.
+        if cfg.encoder == "h264_vaapi" or _av1.needs_vaapi_upload(cfg.encoder):
             return cfg.encoder, cfg.encoder_device or "/dev/dri/renderD128"
         return cfg.encoder, cfg.encoder_device
     # nvenc FIRST: R3D renders on NVIDIA (2070S / 1070). The old vaapi-first
@@ -2006,7 +2015,7 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
     w, h = cfg.resolution
     enc, dev = _probe_encoder(cfg)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-    if enc == "h264_vaapi" and dev:
+    if dev and (enc == "h264_vaapi" or _av1.needs_vaapi_upload(enc)):
         cmd += ["-vaapi_device", dev]
     # RGBA ZERO-COPY PIPELINE: the frame producer hands the GL readback
     # buffer straight down the pipe (no 24<->32-bit repack). rgba input
@@ -2049,6 +2058,14 @@ def _spawn_ffmpeg(cfg: RenderConfig, output_path: Path, audio: Path | None,
     if enc == "h264_vaapi":
         _vb = str(cfg.video_bitrate) if cfg.video_bitrate else "8M"
         cmd += ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", _vb]
+    elif _av1.is_explicit(enc):
+        # AV1 MASTER (8-bit 4:2:0, Main profile, backend-specific controls — see
+        # osu_catch_renderer/av1.py). vaapi carries "-vf format=nv12,hwupload",
+        # which the two-output preview path strips into the graph generically
+        # (its `if "-vf" in vc` below). The inline preview + Discord compact stay
+        # H.264. Fail-closed: a failed AV1 encode has NO H.264/CPU fallback.
+        cmd += _av1.master_video_args(enc, w=w, h=h, fps=cfg.fps,
+                                      video_bitrate=cfg.video_bitrate)
     elif enc == "h264_nvenc":
         # Resolution-scaled bitrate ladder (was flat 8M) -- R3D cross-engine
         # NVENC policy; see nvenc_target_bps above.

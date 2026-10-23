@@ -37,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resolution", type=_resolution, default=(1920, 1080))
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--encoder", default="auto",
-                    help="auto | h264_vaapi | h264_nvenc | h264_videotoolbox | libx264")
+                    help="H.264: auto | h264_vaapi | h264_nvenc | "
+                         "h264_videotoolbox | libx264. AV1 master (hardware "
+                         "only, fail-closed): av1 | av1_vaapi | av1_nvenc | "
+                         "av1_amf | av1_qsv (no hardware AV1 on Apple Silicon)")
     ap.add_argument("--encoder-device", default=None, help="e.g. /dev/dri/renderD128")
     ap.add_argument("--video-bitrate", type=_bitrate, default=None,
                     help="override the auto resolution-scaled bitrate, e.g. "
