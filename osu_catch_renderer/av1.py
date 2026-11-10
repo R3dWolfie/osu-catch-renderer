@@ -20,7 +20,7 @@ hardware probe. Implements Leon's AV1 migration design
       - av1_amf   : `-rc qvbr -qvbr_quality_level N` (AMD AMF, Windows).
   * Output is 8-bit 4:2:0 (nv12 for vaapi/qsv, yuv420p for nvenc/amf) in AV1
     Main profile, `-movflags +faststart`, a ~2 s GOP.
-  * A REAL hardware probe: a 128x128 AV1 test-encode on the SELECTED device
+  * A REAL hardware probe: a 320x240 AV1 test-encode on the SELECTED device
     with the PRODUCTION backend recipe and a strict timeout, whose output is
     confirmed to be ACTUAL AV1 (ffprobe `codec_name=av1`). Compiled-in encoders
     and GPU marketing names are NOT sufficient (design).
@@ -220,7 +220,7 @@ def probe(encoder: str, device: "str | None" = None, *,
           use_cache: bool = True) -> tuple[bool, str]:
     """Real hardware AV1 probe for ONE backend on the SELECTED device.
 
-    Test-encodes a 128x128 frame with the PRODUCTION backend recipe
+    Test-encodes a 320x240 clip with the PRODUCTION backend recipe
     (master_video_args) to a real MP4, then confirms with ffprobe that the
     output is ACTUALLY AV1 (codec_name=av1). Returns (usable, reason); never
     raises. A compiled-in encoder or a matching GPU name is NOT enough — the
@@ -252,12 +252,12 @@ def probe(encoder: str, device: "str | None" = None, *,
             cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
             if needs_vaapi_upload(encoder):
                 cmd += ["-vaapi_device", device]
-            cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "128x128",
-                    "-r", "1", "-i", "pipe:0", "-frames:v", "1", "-an"]
-            cmd += master_video_args(encoder, w=128, h=128, fps=1)
+            cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "320x240",
+                    "-r", "5", "-i", "pipe:0", "-frames:v", "5", "-an"]
+            cmd += master_video_args(encoder, w=320, h=240, fps=5)
             cmd += ["-movflags", "+faststart", out_path]
             try:
-                proc = subprocess.run(cmd, input=bytes(128 * 128 * 3),
+                proc = subprocess.run(cmd, input=bytes(320 * 240 * 3 * 5),
                                       capture_output=True, timeout=timeout,
                                       check=False)
             except subprocess.TimeoutExpired:

@@ -691,28 +691,20 @@ def render_core(
     # — a life dip to 0 on the final note still effectively finished the map.
     last_obj = bm.objects[-1].time_ms
     death_ms = getattr(meta, "death_ms", None)
-    _from_lifebar = getattr(meta, "death_from_lifebar", False)
     if death_ms is None:
         failed = False
-    elif _from_lifebar:
-        # Reliable stable HP-0: a life dip on the final note still finished the map.
-        failed = death_ms < last_obj - 200
     else:
-        # Lazer frame-timing fallback (no life bar): "death" is just where the
-        # replay's INPUT stopped, which on a PASS lands before the last object
-        # when the ending needs no catcher movement (bananas / held-still). The
-        # header proves a clear DETERMINISTICALLY: osu!catch judges every fruit +
-        # big droplet (caught OR missed), so if count_300+count_100+count_miss
-        # covers (essentially) all generated FD, the player reached the end and
-        # it is NOT a fail. Only a genuine early death leaves FD objects unjudged.
-        # Replaces the old <0.85*last heuristic (which could truncate a clear that
-        # ends >15% early -> render a fabricated FC) and matches the guard in
-        # versus_telemetry. (Bugs 2026-08-16 ManuAoK lazer S; 2026-08-26 Veeti
-        # fabricated FC on the snap he missed.)
+        # HP-0 and input-stop are fail candidates, not proof of failure: stable
+        # Relax replays can recover, and a held-still lazer ending needs no new
+        # input. Fruit + large-droplet judgements (caught OR missed) prove that
+        # the playable stream was reached. Tiny droplets precede a slider's
+        # tail fruit; bananas are bonus objects and do not enter these counts.
+        # Do not allow a deficit here: even one unjudged fruit can be a real
+        # fail, and the old four-object tolerance fabricated clears on short maps.
         _total_fd = sum(1 for o in bm.objects
                         if o.kind in (ObjType.FRUIT, ObjType.DROPLET))
         _hdr_fd = int(meta.count_300) + int(meta.count_100) + int(meta.count_miss)
-        _cleared = _hdr_fd >= _total_fd - 4
+        _cleared = _total_fd > 0 and _hdr_fd >= _total_fd
         failed = (death_ms < last_obj - 200) and not _cleared
     sim_end_ms = int(death_ms) if failed else None
     _su_mark("parse+setup -> CatchSim")
