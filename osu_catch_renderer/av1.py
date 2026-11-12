@@ -133,7 +133,7 @@ def master_video_args(encoder: str, *, w: int, h: int, fps: float,
             return base + ["-rc_mode", "VBR", "-b:v", str(vb),
                            "-maxrate", str(int(vb * 1.5))] + tail
         return base + ["-rc_mode", "CQP",
-                       "-global_quality", _env("R3D_AV1_VAAPI_GQ", "90")] + tail
+                       "-global_quality", _env("R3D_AV1_VAAPI_GQ", "30")] + tail
 
     if encoder == "av1_nvenc":
         # NVENC AV1 (Ada / RTX 40+). System yuv420p; CQ-VBR with a maxrate cap,
